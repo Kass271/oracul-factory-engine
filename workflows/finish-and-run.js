@@ -63,11 +63,13 @@ async function role(name, prompt, label, schema) {
 // Official E2E: subStep e2e (the only subStep the hook lets run Playwright) + the locked stack run, in one command.
 // Exit 3 / "STACK BUSY" = another stack operation holds the lock — infrastructure, not code: rerun once, never triage.
 const isBusy = (r) => r.exitCode === 3 || /STACK BUSY/.test(r.output || '')
+// A command a PreToolUse hook refused never ran — a factory bug, never a code failure: no triage, no fix round.
+const isGuardBlock = (r) => r.exitCode !== 0 && /\[oracul guard\]|PreToolUse:Bash hook error/.test(r.output || '')
 async function e2eRun(label) {
   const cmd = `${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'e2e')}`
   let r = await sh(cmd, label)
   if (isBusy(r)) { log('stack busy — rerunning E2E once'); r = await sh(cmd, `${label} (stack busy, retry)`) }
-  return { ...r, busy: isBusy(r) }
+  return { ...r, busy: isBusy(r), guard: isGuardBlock(r) }
 }
 const failureBlock = (out) => (String(out || '').match(/==== E2E FAILURES[\s\S]*?==== END E2E FAILURES ====/) || [''])[0]
 const NO_E2E = 'Do not run Playwright, docker compose or stack.mjs up/down/e2e — the workflow\'s E2E step runs them (hook-enforced). Unit/integration tests (./gradlew test, npm run test:ci) are fine. For E2E failures read the E2E FAILURES block you were given.'
@@ -123,6 +125,7 @@ let clean = false
 for (let r = 1; r <= MAX && !clean; r++) {
   report.rounds = r
   const v = await sh(node('checks/verify.mjs', '--scope all'), `verify all r${r}`)
+  if (isGuardBlock(v)) { report.problems = ['verify: blocked by guard hook']; break }
   if (v.exitCode !== 0) { if (r < MAX) await fix(r, await triage('verify --scope all', v.output, r)); report.problems = ['verify']; continue }
   await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${r}`)
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
@@ -137,7 +140,7 @@ if (!clean) report.status = 'RED'
 // ---------------------------------------------------------------- Run + E2E
 phase('Run + E2E')
 let e2e = await e2eRun('docker up + e2e')
-for (let r = 1; r < MAX && e2e.exitCode !== 0 && !e2e.busy; r++) {
+for (let r = 1; r < MAX && e2e.exitCode !== 0 && !e2e.busy && !e2e.guard; r++) {
   e2eFailures = failureBlock(e2e.output)
   await sh(node('bin/state.mjs', 'set subStep green'), `state → green (after e2e r${r})`)
   await fix(`e2e-${r}`, await triage('E2E (Playwright against the Docker stack, rebuilt with docker compose up --build)', e2e.output, `e2e-${r}`))
@@ -145,6 +148,7 @@ for (let r = 1; r < MAX && e2e.exitCode !== 0 && !e2e.busy; r++) {
 }
 e2eFailures = ''
 if (e2e.busy) { report.status = 'RED'; report.problems.push('e2e: stack busy') }
+else if (e2e.guard) { report.status = 'RED'; report.problems.push('e2e: blocked by guard hook') }
 else if (e2e.exitCode !== 0) { report.status = 'RED'; report.problems.push('e2e') }
 
 // ---------------------------------------------------------------- QA

@@ -577,6 +577,17 @@ wf('workflow green: stack busy once → rerun, no fix round, DONE', 0, wfArgs({ 
 });
 wf('workflow red: stack busy twice → BLOCKED "e2e: stack busy", never triaged', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(2), ({ result, calls }) =>
   (result.status === 'BLOCKED' && result.failing.includes('e2e: stack busy') && !calls.some((c) => /^triage/.test(c.opts.label || '')) ? 1 : 0));
+const GUARD_OUT = 'PreToolUse:Bash hook error: [node "/e/hooks/guard-edits.mjs"]: [oracul guard] `node "/e/bin/stack.mjs" e2e` is a stack operation: …'
+const refuse = (re) => (p, o) => (re.test(p) ? { exitCode: 1, output: GUARD_OUT } : ok0(p, o));
+const oneRoundNoTriage = (calls) => !calls.some((c) => /^triage/.test(c.opts.label || '')) && !calls.some((c) => / r2$/.test(c.opts.label || ''));
+wf('workflow red: E2E refused by the guard → BLOCKED "e2e: blocked by guard hook", never triaged, one round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/stack\.mjs" e2e/), ({ result, calls }) =>
+  (result.status === 'BLOCKED' && result.failing.includes('e2e: blocked by guard hook') && oneRoundNoTriage(calls) ? 1 : 0));
+wf('workflow red: verify refused by the guard → BLOCKED "verify: blocked by guard hook", never triaged, one round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/checks\/verify\.mjs"/), ({ result, calls }) =>
+  (result.status === 'BLOCKED' && result.failing.includes('verify: blocked by guard hook') && oneRoundNoTriage(calls) ? 1 : 0));
+wf('workflow green: a real E2E failure is still triaged (not mistaken for a guard block)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
+  let n = 0;
+  return (p, o) => (/stack\.mjs" e2e/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL\n  1 failed: rooms.spec.ts' } : ok0(p, o));
+})(), ({ result, calls }) => (result.status === 'DONE' && calls.some((c) => /^triage: E2E/.test(c.opts.label || '')) ? 0 : 1));
 const BLOCK = '==== E2E FAILURES (1) ====\n✘ rooms.spec.ts › FR-1 create room\n    Error: not visible\n==== END E2E FAILURES ===='
 wf('workflow green: E2E FAILURES block reaches the next fix round; builders told not to run E2E', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
   let n = 0;
@@ -595,7 +606,51 @@ for (const c of asyncCases) {
   results.push({ name: c.name, ok: got === c.expectCode, expectCode: c.expectCode, got, note, out: '' });
 }
 
+// note() runs for real in bash: an exact repeat (runner executed the command twice) is appended once;
+// a different block under the same title (a resumed run) is still appended.
+const noteCommands = async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracul-note-'));
+  const cmds = [];
+  let v = 0;
+  await runWorkflow('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, phaseDir: dir, maxRounds: 2 }), (p, o) => {
+    if (o.label?.startsWith('run: note')) cmds.push((p.match(/```bash\n([\s\S]*?)\n```/) || [])[1]);
+    return /checks\/verify\.mjs"/.test(p) ? { exitCode: 1, output: `verify RED #${++v}` } : ok0(p, o);
+  });
+  return { dir, cmds: cmds.filter(Boolean) };
+};
+for (const [name, expectCode, plan] of [
+  ['note green: runner executes the same note twice → appended once', 0, (c) => [c[0], c[0]]],
+  ['note red: two different notes are both appended (resume is not swallowed)', 1, (c) => [c[0], c[1]]],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try {
+    const { dir, cmds } = await noteCommands();
+    for (const cmd of plan(cmds)) { const r = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' }); if (r.status !== 0) throw new Error(r.stderr); }
+    const text = fs.readFileSync(path.join(dir, '04_build', '01_rooms', 'rounds.md'), 'utf8');
+    const heads = (text.match(/^## Round \d+$/gm) || []).length;
+    got = heads === 1 ? 0 : heads === 2 ? 1 : 'other';
+    note = `${heads} heading(s)`;
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
+}
+
 const relArgs = { engine: ENGINE, root: '/r', app: 'a', appDir: '/r/apps/a', phase: 'phase-01_mvp', phaseDir: '/r/apps/a/docs/phase-01_mvp' };
+for (const [name, expectCode, answer, problem] of [
+  ['workflow red: release E2E refused by the guard → RED "e2e: blocked by guard hook", never triaged', 1, () => refuse(/stack\.mjs" e2e/), 'e2e: blocked by guard hook'],
+  ['workflow red: release verify refused by the guard → RED "verify: blocked by guard hook", never triaged', 1, () => refuse(/checks\/verify\.mjs" --scope all/), 'verify: blocked by guard hook'],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try {
+    const { result, calls } = await runWorkflow('finish-and-run.js', relArgs, answer());
+    const triaged = calls.some((c) => /^triage/.test(c.opts.label || ''));
+    got = result.status === 'RED' && result.problems.includes(problem) && !triaged ? 1 : 0;
+    if (!got) note = JSON.stringify(result).slice(0, 300);
+  } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
+}
 for (const [name, expectCode, busyTimes] of [['workflow red: release stack busy twice → RED "e2e: stack busy", never triaged', 1, 2], ['workflow green: release stack busy once → rerun, GREEN', 0, 1]]) {
   if (filter && !name.includes(filter)) continue;
   let got, note = '';

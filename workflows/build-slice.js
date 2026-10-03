@@ -79,10 +79,17 @@ async function role(name, prompt, label, schema) {
   return agent(`You are the Oracul ${name}. First read ${A.engine}/agents/${name}.md and follow it exactly (also load the skills it names).\n\n${prompt}`, opts)
 }
 
-const note = (title, body) => sh(`mkdir -p "${sliceDir}" && cat >> "${sliceDir}/rounds.md" <<'ORACUL_EOF'\n\n## ${title}\n${body}\nORACUL_EOF`, `note ${title}`)
+// Append a section to rounds.md — idempotent: a runner that executes the command twice (it happened) appends it once.
+// Only an exact repeat of the file's last block is skipped, so a resumed run can still write its own "Round 1".
+const note = (title, body) => {
+  const f = `${sliceDir}/rounds.md`
+  return sh(`mkdir -p "${sliceDir}" && n=$(mktemp) && cat > "$n" <<'ORACUL_EOF' && { tail -c "$(($(wc -c < "$n")))" "${f}" 2>/dev/null | cmp -s - "$n" || cat "$n" >> "${f}"; }; rm -f "$n"\n\n## ${title}\n${body}\nORACUL_EOF`, `note ${title}`)
+}
 // Official E2E: subStep e2e (the only subStep the hook lets run Playwright) + the locked stack run, in one command.
 // Exit 3 / "STACK BUSY" = another stack operation holds the lock — infrastructure, not code: rerun once, never triage.
 const isBusy = (r) => r.exitCode === 3 || /STACK BUSY/.test(r.output || '')
+// A command a PreToolUse hook refused never ran — a factory bug, never a code failure: no triage, no fix round.
+const isGuardBlock = (r) => r.exitCode !== 0 && /\[oracul guard\]|PreToolUse:Bash hook error/.test(r.output || '')
 async function e2eRun(label) {
   const cmd = `${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'e2e')}`
   let r = await sh(cmd, label)
@@ -153,6 +160,12 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   e2eFailures = ''
 
   const v = await sh(node('checks/verify.mjs'), `verify r${rounds}`)
+  if (isGuardBlock(v)) {
+    failing = ['verify: blocked by guard hook']
+    feedback = `verify was refused by a PreToolUse hook (factory bug, the command never ran):\n${v.output}`
+    await note(`Round ${rounds}`, `- Trigger: verify refused by the guard hook — factory bug, not triaged\n- Output:\n\n\`\`\`\n${v.output.slice(-1500)}\n\`\`\``)
+    break
+  }
   if (v.exitCode !== 0) {
     failing = ['verify']
     feedback = `verify is RED:\n${v.output}`
@@ -166,6 +179,12 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
     failing = ['e2e: stack busy']
     feedback = `Another stack operation held the lock twice in a row (not a code failure):\n${e.output}`
     await note(`Round ${rounds}`, `- Trigger: E2E could not run — stack busy (lock held by another operation), not triaged\n- Output:\n\n\`\`\`\n${e.output.slice(-1500)}\n\`\`\``)
+    break
+  }
+  if (isGuardBlock(e)) {
+    failing = ['e2e: blocked by guard hook']
+    feedback = `E2E was refused by a PreToolUse hook (factory bug, the command never ran):\n${e.output}`
+    await note(`Round ${rounds}`, `- Trigger: E2E refused by the guard hook — factory bug, not triaged\n- Output:\n\n\`\`\`\n${e.output.slice(-1500)}\n\`\`\``)
     break
   }
   if (e.exitCode !== 0) {
