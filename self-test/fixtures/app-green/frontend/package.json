@@ -1,0 +1,11 @@
+{
+  "name": "frontend",
+  "scripts": {
+    "generate:api": "ng-openapi-gen --config ng-openapi-gen.json",
+    "prestart": "npm run generate:api",
+    "prebuild": "npm run generate:api",
+    "pretest": "npm run generate:api",
+    "test:ci": "ng test --watch=false --coverage"
+  },
+  "dependencies": { "@angular/material": "22.2.1" }
+}

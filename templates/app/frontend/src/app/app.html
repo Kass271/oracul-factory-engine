@@ -1,0 +1,9 @@
+<mat-toolbar color="primary">
+  <span data-testid="app-title">{{ title }}</span>
+  <span class="spacer"></span>
+  <span class="status" data-testid="backend-status">backend: {{ backendStatus() }}</span>
+</mat-toolbar>
+
+<main class="content">
+  <router-outlet />
+</main>

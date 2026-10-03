@@ -1,0 +1,16 @@
+openapi: 3.0.3
+info:
+  title: Fixture API
+  version: 0.1.0
+paths:
+  /api/rooms:
+    get:
+      operationId: listRooms
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: createRoom
+      responses:
+        '201':
+          description: created

@@ -1,0 +1,18 @@
+{
+  "slice": "{{SLICE}}",
+  "round": 1,
+  "reviewer": "reviewer",
+  "findings": [
+    {
+      "id": "R1",
+      "severity": "high | medium | low",
+      "dimension": "correctness | security | spec-compliance | error-handling | tests | ui",
+      "file": "backend/src/main/java/...",
+      "line": 1,
+      "fr": "FR-1",
+      "problem": "what is wrong and why it matters",
+      "fix": "the smallest correct fix",
+      "status": "open | fixed | wontfix"
+    }
+  ]
+}

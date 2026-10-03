@@ -1,0 +1,3 @@
+{ "config": { "rootDir": "__E2E_TESTS__" },
+  "suites": [ { "title": "rooms.spec.ts", "file": "rooms.spec.ts", "specs": [ { "title": "FR-1 create room", "file": "rooms.spec.ts", "tests": [ { "status": "expected" } ] } ], "suites": [] } ],
+  "stats": { "expected": 1, "unexpected": 0, "flaky": 0, "skipped": 0 } }

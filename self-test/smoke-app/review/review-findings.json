@@ -1,0 +1,1 @@
+{ "slice": "01_todos", "round": 1, "reviewer": "smoke", "findings": [ { "id": "R1", "severity": "low", "dimension": "ui", "file": "frontend/src/app/todos/todos-page.html", "line": 1, "fr": "FR-1", "problem": "no loading indicator", "fix": "add mat-progress-bar", "status": "open" } ] }

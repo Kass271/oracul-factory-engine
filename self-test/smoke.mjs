@@ -1,0 +1,146 @@
+#!/usr/bin/env node
+// Full smoke test of the factory pipeline with REAL tools (Spring Initializr, Gradle, Angular CLI, Docker, Playwright).
+// The agents' work is replaced by a canned "todo" app (self-test/smoke-app) so the run is deterministic; every gate,
+// check, hook decision and state transition is the real one. Runs in a sandbox (own apps + state dir), never in ../apps.
+//   node self-test/smoke.mjs [--keep-running] [--dir <sandbox>]
+// Exit 0 only if every step behaves as expected (including the gates that MUST say no).
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { ENGINE, parseArgs } from '../checks/lib/core.mjs';
+
+const args = parseArgs();
+const SMOKE = path.join(ENGINE, 'self-test', 'smoke-app');
+const root = path.resolve(args.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'oracul-smoke-')));
+fs.mkdirSync(root, { recursive: true });
+const APP = 'smoke-todo';
+const appDir = path.join(root, 'apps', APP);
+const env = { ...process.env, FACTORY_APPS_DIR: path.join(root, 'apps'), FACTORY_STATE_DIR: path.join(root, 'state') };
+const PHASE = 'phase-01_mvp';
+const docs = (step) => path.join(appDir, 'docs', PHASE, step);
+const log = [];
+
+function sh(script, a = [], opts = {}) {
+  const r = spawnSync('node', [path.join(ENGINE, script), ...a], { env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, cwd: root, ...opts });
+  return { code: r.status, out: (r.stdout || '') + (r.stderr || '') + (r.error ? String(r.error) : '') };
+}
+const hook = (name, event) => sh(`hooks/${name}.mjs`, [], { input: JSON.stringify({ cwd: root, ...event }) });
+const copy = (from, to) => fs.cpSync(from, to, { recursive: true });
+
+function step(name, expect, fn) {
+  const t0 = Date.now();
+  process.stdout.write(`▶ ${name} … `);
+  let r;
+  try { r = fn(); } catch (e) { r = { code: 'ERR', out: String(e.stack || e) }; }
+  const ok = r.code === expect;
+  const secs = Math.round((Date.now() - t0) / 1000);
+  log.push({ name, ok, expect, got: r.code, secs });
+  console.log(`${ok ? 'PASS' : 'FAIL'} (exit ${r.code}, expected ${expect}, ${secs}s)`);
+  if (!ok) {
+    console.log(r.out.split('\n').slice(-80).map((l) => `   | ${l}`).join('\n'));
+    finish(1);
+  }
+  return r;
+}
+
+function finish(code) {
+  if (!args['keep-running'] && fs.existsSync(path.join(appDir, 'docker-compose.yml'))) sh('bin/stack.mjs', ['down']);
+  const total = log.reduce((s, l) => s + l.secs, 0);
+  console.log(`\n${log.filter((l) => l.ok).length}/${log.length} smoke steps passed in ${Math.round(total / 60)} min — sandbox: ${root}`);
+  console.log(code ? '❌ SMOKE RED' : '✅ SMOKE GREEN');
+  process.exit(code);
+}
+
+console.log(`Oracul smoke test — sandbox ${root}\n`);
+
+// ---------------------------------------------------------------- Step 0
+step('env-check (Docker, JDK, Node, network)', 0, () => sh('bin/env-check.mjs'));
+step('state init + phase new', 0, () => {
+  const a = sh('bin/state.mjs', ['init', APP, '--title', 'Smoke Todo']);
+  return a.code ? a : sh('bin/state.mjs', ['phase', 'new', 'mvp']);
+});
+step('env-check --write', 0, () => sh('bin/env-check.mjs', ['--write']));
+step('scaffold (Initializr + Angular + Material + Playwright)', 0, () => sh('bin/scaffold.mjs'));
+step('Step 0 artifacts', 0, () => sh('checks/check-artifacts.mjs', ['--step', '00_setup']));
+step('Step 0 verify on the skeleton (Gradle + Testcontainers + Vitest)', 0, () => sh('checks/verify.mjs'));
+step('commit skeleton', 0, () => sh('bin/commit.mjs', ['--message', `${PHASE} 00_setup: skeleton`]));
+
+// ---------------------------------------------------------------- Step 1
+sh('bin/state.mjs', ['set', 'step', '01_scope']);
+copy(path.join(SMOKE, 'docs', '01_scope'), docs('01_scope'));
+step('Step 1 gate says NO before the user approves', 1, () => sh('checks/check-artifacts.mjs', ['--step', '01_scope']));
+step('stop hook never blocks the dialog step', 0, () => hook('stop', { stop_hook_active: false }));
+step('user approves scope → gate green', 0, () => {
+  const a = sh('bin/state.mjs', ['approve', 'scope']);
+  return a.code ? a : sh('checks/check-artifacts.mjs', ['--step', '01_scope']);
+});
+
+// ---------------------------------------------------------------- Step 2
+sh('bin/state.mjs', ['set', 'step', '02_specs']);
+copy(path.join(SMOKE, 'docs', '02_specs'), docs('02_specs'));
+copy(path.join(SMOKE, 'contract'), appDir);
+step('Step 2 specs cover every FR + contract valid', 0, () => {
+  const a = sh('checks/check-artifacts.mjs', ['--step', '02_specs']);
+  return a.code ? a : sh('checks/check-contract.mjs');
+});
+
+// ---------------------------------------------------------------- Step 3
+sh('bin/state.mjs', ['set', 'step', '03_plan']);
+copy(path.join(SMOKE, 'docs', '03_plan'), docs('03_plan'));
+step('Step 3 gate says NO before the user approves', 1, () => sh('checks/check-artifacts.mjs', ['--step', '03_plan']));
+step('user approves plan → slices loaded → gate green', 0, () => {
+  for (const a of [['approve', 'plan'], ['slices-from-plan']]) { const r = sh('bin/state.mjs', a); if (r.code) return r; }
+  const n = sh('bin/state.mjs', ['next-slice']);
+  if (n.out.trim() !== '01_todos') return { code: 1, out: `next-slice: ${n.out}` };
+  return sh('checks/check-artifacts.mjs', ['--step', '03_plan']);
+});
+sh('bin/commit.mjs', ['--message', `${PHASE} 01-03: scope, specs, plan approved`]);
+
+// ---------------------------------------------------------------- Step 4 — slice 01_todos
+sh('bin/state.mjs', ['set', 'step', '04_build']);
+for (const a of [['set', 'slice', '01_todos'], ['slice', '01_todos', 'IN_PROGRESS'], ['set', 'subStep', 'red']]) sh('bin/state.mjs', a);
+const W = (rel) => ({ tool_name: 'Write', tool_input: { file_path: path.join(appDir, rel), content: 'x' } });
+step('RED: guard blocks production code', 2, () => hook('guard-edits', W('backend/src/main/java/com/oracul/app/todos/TodosController.java')));
+step('RED: guard allows writing tests', 0, () => hook('guard-edits', W('backend/src/test/java/com/oracul/app/todos/TodosApiIT.java')));
+copy(path.join(SMOKE, 'red'), appDir);
+step('RED: red-check proves tests fail for the right reason', 0, () => sh('bin/red-check.mjs', ['--slice', '01_todos']));
+
+sh('bin/state.mjs', ['set', 'subStep', 'green']);
+sh('bin/state.mjs', ['round', '+1']);
+step('GREEN: guard blocks editing a test', 2, () => hook('guard-edits', W('frontend/src/app/todos/todos.spec.ts')));
+step('GREEN: guard blocks editing the contract', 2, () => hook('guard-edits', W('api/openapi.yaml')));
+step('stop hook blocks while verify is stale', 2, () => hook('stop', { stop_hook_active: false }));
+copy(path.join(SMOKE, 'green'), appDir);
+step('GREEN: verify (backend + frontend + all checks)', 0, () => sh('checks/verify.mjs'));
+
+sh('bin/state.mjs', ['set', 'subStep', 'review']);
+step('REVIEW: reviewer may not touch code', 2, () => hook('guard-edits', W('backend/src/main/java/com/oracul/app/todos/TodoEntity.java')));
+step('REVIEW: subagent-stop blocks a reviewer without findings file', 2, () => hook('subagent-stop', { agent_type: 'oracul:reviewer' }));
+copy(path.join(SMOKE, 'review', 'review-findings.json'), path.join(docs('04_build'), '01_todos', 'review-findings.json'));
+step('REVIEW: findings clean', 0, () => sh('checks/check-review.mjs', ['--slice', '01_todos']));
+step('slice close: DONE + coverage ratchet + artifacts + commit', 0, () => {
+  for (const a of [['slice', '01_todos', 'DONE'], ['set', 'subStep', 'none']]) sh('bin/state.mjs', a);
+  for (const [s, a] of [['checks/check-coverage.mjs', ['--update']], ['checks/check-artifacts.mjs', ['--step', '04_build']], ['bin/commit.mjs', ['--message', `${PHASE} 01_todos: done (FR-1, FR-2)`]]]) {
+    const r = sh(s, a); if (r.code) return r;
+  }
+  return { code: 0, out: '' };
+});
+
+// ---------------------------------------------------------------- Step 5
+for (const a of [['set', 'step', '05_release'], ['set', 'slice', 'none']]) sh('bin/state.mjs', a);
+step('release verify --scope all', 0, () => sh('checks/verify.mjs', ['--scope', 'all']));
+copy(path.join(SMOKE, 'release', 'review-findings.json'), path.join(docs('05_release'), 'review-findings.json'));
+step('release review clean', 0, () => sh('checks/check-review.mjs', ['--release']));
+step('Docker stack up + Playwright E2E with screenshot evidence', 0, () => sh('bin/stack.mjs', ['e2e']));
+step('gen-traceability: every FR ✔', 0, () => sh('checks/gen-traceability.mjs'));
+step('Step 5 gate says NO before the QA pack exists', 1, () => sh('checks/check-artifacts.mjs', ['--step', '05_release']));
+copy(path.join(SMOKE, 'release', 'qa'), path.join(docs('05_release'), 'qa'));
+step('Step 5 artifacts (QA pack, screenshots, E2E report, traceability)', 0, () => sh('checks/check-artifacts.mjs', ['--step', '05_release']));
+step('final verify (quick) + stop hook lets the session end', 0, () => {
+  const v = sh('checks/verify.mjs', ['--quick', '--scope', 'all']);
+  return v.code ? v : hook('stop', { stop_hook_active: false });
+});
+step('release commit', 0, () => sh('bin/commit.mjs', ['--message', `${PHASE} 05_release: GREEN`]));
+console.log('\n' + fs.readFileSync(path.join(docs('05_release'), 'qa', 'traceability.md'), 'utf8'));
+finish(0);

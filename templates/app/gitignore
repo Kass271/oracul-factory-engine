@@ -1,0 +1,13 @@
+# Oracul app — build outputs and local artefacts
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+backend/build/
+backend/.gradle/
+frontend/dist/
+frontend/.angular/
+frontend/coverage/
+frontend/src/app/api/
+e2e/report/
+e2e/test-results/

@@ -1,0 +1,17 @@
+<h1>Todos</h1>
+
+<div class="add">
+  <mat-form-field appearance="outline">
+    <mat-label>New todo</mat-label>
+    <input matInput data-testid="todo-title" [value]="title()" (input)="title.set($any($event.target).value)" />
+  </mat-form-field>
+  <button mat-flat-button type="button" data-testid="todo-add" (click)="add()">Add</button>
+</div>
+
+<mat-list>
+  @for (todo of todos(); track todo.id) {
+    <mat-list-item data-testid="todo-row">{{ todo.title }}</mat-list-item>
+  } @empty {
+    <p data-testid="todo-empty">Nothing to do yet.</p>
+  }
+</mat-list>

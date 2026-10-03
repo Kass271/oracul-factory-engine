@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="UTF-8"?><report name="backend"><package name="com/oracul/app"><counter type="LINE" missed="5" covered="5"/></package><counter type="INSTRUCTION" missed="10" covered="40"/><counter type="LINE" missed="20" covered="80"/></report>

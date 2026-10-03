@@ -1,0 +1,162 @@
+export const meta = {
+  name: 'oracul-finish-and-run',
+  description: 'Oracul Step 5: full verify, independent whole-app review (fix loop ≤5), Docker stack + Playwright E2E with screenshots, generated traceability, QA pack, artifact check, commit — app left running',
+  phases: [
+    { title: 'Verify + Review', detail: 'full verify and whole-app review; code fixes by builders, test fixes by the tester' },
+    { title: 'Run + E2E', detail: 'docker compose up, Playwright against the stack' },
+    { title: 'QA', detail: 'gen-traceability, qa-documenter, check-artifacts 05_release' },
+    { title: 'Finish', detail: 'final verify, commit, report' },
+  ],
+}
+
+// args: { engine, root, app, appDir, phase, phaseDir, agentNs?: 'oracul', maxRounds?: 5 }
+const A = args || {}
+const need = ['engine', 'root', 'app', 'appDir', 'phase', 'phaseDir']
+const missing = need.filter((k) => !A[k])
+if (missing.length) return { error: `finish-and-run: missing args ${missing.join(', ')} — args did not reach the script` }
+
+const NS = A.agentNs || 'oracul'
+const MAX = A.maxRounds || 5
+const node = (script, rest) => `node "${A.engine}/${script}" ${rest || ''}`.trim()
+const rel = `${A.phaseDir}/05_release`
+const CTX = `App: ${A.appDir}\nPhase docs: ${A.phaseDir}\nRelease folder: ${rel}\nContract: ${A.appDir}/api/openapi.yaml\nEngine (read-only): ${A.engine}`
+
+const RUN_SCHEMA = {
+  type: 'object',
+  properties: { exitCode: { type: 'integer' }, output: { type: 'string' } },
+  required: ['exitCode', 'output'],
+}
+const PROBLEMS = { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, problem: { type: 'string' } }, required: ['file', 'problem'] } }
+const BUILDER_SCHEMA = { type: 'object', properties: { summary: { type: 'string' }, testProblems: PROBLEMS }, required: ['summary', 'testProblems'] }
+const TRIAGE_SCHEMA = { type: 'object', properties: { code: { type: 'string' }, tests: PROBLEMS }, required: ['code', 'tests'] }
+const REVIEW_SCHEMA = {
+  type: 'object',
+  properties: {
+    open: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'string' }, severity: { type: 'string' }, dimension: { type: 'string' }, file: { type: 'string' }, problem: { type: 'string' }, fix: { type: 'string' } },
+        required: ['id', 'severity', 'dimension', 'file', 'problem'],
+      },
+    },
+  },
+  required: ['open'],
+}
+async function sh(cmd, label) {
+  const res = await agent(
+    `Run exactly this shell command from the directory ${A.root} and report the result. Use the Bash tool in the foreground with timeout 600000 (never run_in_background). Do not modify files yourself, do not retry, do not try to fix anything. If the command times out, report exitCode 124.\n\n\`\`\`bash\n${cmd}\n\`\`\`\n\nReturn exitCode (the command's real exit status) and output (the last 80 lines of combined stdout/stderr, verbatim).`,
+    { label: `run: ${label}`, schema: RUN_SCHEMA, model: 'haiku', effort: 'low' },
+  )
+  return res || { exitCode: 1, output: 'runner returned nothing' }
+}
+async function role(name, prompt, label, schema) {
+  const opts = schema ? { label, schema } : { label }
+  try {
+    const r = await agent(prompt, { ...opts, agentType: `${NS}:${name}` })
+    if (r !== null) return r
+  } catch (e) {
+    log(`agent type ${NS}:${name} unavailable (${e}) — using role file`)
+  }
+  return agent(`You are the Oracul ${name}. First read ${A.engine}/agents/${name}.md and follow it exactly (also load the skills it names).\n\n${prompt}`, opts)
+}
+const isTest = (f) => /(^|\/)(backend\/src\/test\/|e2e\/tests\/)|\.spec\.ts$/.test(f || '')
+const list = (ps) => ps.map((p) => `- ${p.file}: ${p.problem}`).join('\n')
+let hints = [] // tests the builders flagged as possibly wrong in the last fix round
+
+// Decide who fixes a failing gate: the tester (test is broken or contradicts the spec) or the builders (code).
+async function triage(gate, output, round) {
+  const t = await agent(`${CTX}\n\nThe ${gate} gate of the release failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} r${round}`, schema: TRIAGE_SCHEMA })
+  if (!t || (!t.code && !t.tests.length)) return { code: `${gate} is RED:\n${output}`, tests: [] }
+  return t
+}
+// Review findings about tests go to the tester, the rest to the builders.
+function routeReview(rv, checkOutput) {
+  const open = (rv && rv.open) || []
+  if (!open.length) return { code: `Release review findings (open high/medium in ${rel}/review-findings.json):\n${checkOutput}\nFindings about tests are for the tester — report them in testProblems.`, tests: [] }
+  const tests = open.filter((f) => f.dimension === 'tests' || isTest(f.file))
+  const code = open.filter((f) => !tests.includes(f))
+  const fmt = (f) => `${f.id} [${f.severity}] ${f.problem}${f.fix ? ` — fix: ${f.fix}` : ''}`
+  return {
+    code: code.length ? `Release review findings (${rel}/review-findings.json):\n${code.map((f) => `- ${f.file}: ${fmt(f)}`).join('\n')}` : '',
+    tests: tests.map((f) => ({ file: f.file, problem: fmt(f) })),
+  }
+}
+// One fix round: tester repairs tests (code locked), then builders fix code (tests locked).
+async function fix(round, work) {
+  await sh(node('bin/state.mjs', 'round +1'), `round ${round}`)
+  if (work.tests.length) {
+    await sh(node('bin/state.mjs', 'set subStep test-fix'), `state → test-fix r${round}`)
+    await role('tester', `${CTX}\n\nRelease fix round ${round} — repair these tests (production code is locked for you):\n${list(work.tests)}\n\nThe spec and contract are the authority: make each test assert exactly what they say. Never weaken an assertion just to make it pass, never delete a test of an FR that is still valid, keep every @trace tag. Run the affected tests before finishing.`, `tester fix r${round}`)
+  }
+  await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${round}`)
+  hints = []
+  if (!work.code) return
+  const task = `Release fix round ${round}. Fix exactly these problems (tests and contract are locked for you; if you believe a test is wrong, report it in testProblems — the tester fixes tests):\n${work.code}`
+  const rs = await parallel([
+    () => role('backend-builder', `${CTX}\n\n${task}`, `backend fix r${round}`, BUILDER_SCHEMA),
+    () => role('frontend-builder', `${CTX}\n\n${task}`, `frontend fix r${round}`, BUILDER_SCHEMA),
+  ])
+  hints = rs.filter(Boolean).flatMap((r) => r.testProblems || [])
+}
+
+const report = { status: 'GREEN', rounds: 0, problems: [] }
+
+// ---------------------------------------------------------------- Verify + Review
+phase('Verify + Review')
+await sh(`${node('bin/state.mjs', 'set step 05_release')} && ${node('bin/state.mjs', 'set slice none')} && ${node('bin/state.mjs', 'set subStep none')}`, 'state → 05_release')
+let clean = false
+for (let r = 1; r <= MAX && !clean; r++) {
+  report.rounds = r
+  const v = await sh(node('checks/verify.mjs', '--scope all'), `verify all r${r}`)
+  if (v.exitCode !== 0) { if (r < MAX) await fix(r, await triage('verify --scope all', v.output, r)); report.problems = ['verify']; continue }
+  await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${r}`)
+  const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
+  const rv = await role('reviewer', `${CTX}\n\nRelease review (whole app, all phases), round ${r}. Write ${rel}/review-findings.json with "slice": "release", "round": ${r}. Focus on cross-slice integration, error handling, security, and FRs that may have regressed. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: release r${r}`, REVIEW_SCHEMA)
+  const c = await sh(node('checks/check-review.mjs', '--release'), `check-review release r${r}`)
+  if (c.exitCode === 0) { clean = true; report.problems = []; break }
+  report.problems = ['release review']
+  if (r < MAX) await fix(r, routeReview(rv, c.output))
+}
+if (!clean) report.status = 'RED'
+
+// ---------------------------------------------------------------- Run + E2E
+phase('Run + E2E')
+await sh(node('bin/state.mjs', 'set subStep none'), 'state → none')
+let e2e = await sh(node('bin/stack.mjs', 'e2e'), 'docker up + e2e')
+for (let r = 1; r < MAX && e2e.exitCode !== 0; r++) {
+  await fix(`e2e-${r}`, await triage('E2E (Playwright against the Docker stack, rebuilt with docker compose up --build)', e2e.output, `e2e-${r}`))
+  e2e = await sh(node('bin/stack.mjs', 'e2e'), `docker up + e2e r${r + 1}`)
+}
+if (e2e.exitCode !== 0) { report.status = 'RED'; report.problems.push('e2e') }
+
+// ---------------------------------------------------------------- QA
+phase('QA')
+const trace = await sh(node('checks/gen-traceability.mjs'), 'gen-traceability')
+if (trace.exitCode !== 0) { report.status = 'RED'; report.problems.push('traceability has ✘') }
+await sh(node('bin/state.mjs', 'set subStep qa'), 'state → qa')
+let art = null
+for (let attempt = 1; attempt <= 2; attempt++) {
+  const extra = art ? `\n\nThe artifact check rejected the pack:\n${art.output}` : ''
+  await role('qa-documenter', `${CTX}\n\nWrite the QA pack for ${A.phase} in ${rel}/qa/ (test-plan.md, acceptance-report.md, how-to-run.md). Traceability summary:\n${trace.output}${extra}`, `qa-documenter${attempt > 1 ? ' (retry)' : ''}`)
+  art = await sh(node('checks/check-artifacts.mjs', '--step 05_release'), 'check-artifacts 05_release')
+  if (art.exitCode === 0) break
+}
+if (art.exitCode !== 0) { report.status = 'RED'; report.problems.push('release artifacts') }
+
+// ---------------------------------------------------------------- Finish
+phase('Finish')
+const fin = await sh([
+  node('bin/state.mjs', 'set subStep none'),
+  node('checks/verify.mjs', '--quick --scope all'),
+].join(' && '), 'final verify (quick)')
+if (fin.exitCode !== 0) { report.status = 'RED'; report.problems.push('final verify') }
+await sh(node('bin/commit.mjs', `--message "${A.phase} 05_release: ${report.status}${report.problems.length ? ` (${report.problems.join(', ')})` : ''}"`), 'commit release')
+
+return {
+  ...report,
+  urls: { frontend: 'http://localhost:4200', backend: 'http://localhost:8080/api', health: 'http://localhost:8080/actuator/health' },
+  traceability: trace.output.slice(-600),
+  artifacts: art.output.slice(-2000),
+  e2e: e2e.output.slice(-1200),
+}
