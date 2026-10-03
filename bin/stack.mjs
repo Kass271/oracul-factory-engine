@@ -9,13 +9,20 @@
 //   e2e --scratch --grep <spec file | title pattern>
 //           tester verification run (test-fix only, hook-enforced): same lock and build, scoped to the pattern,
 //           writes e2e/report-scratch + e2e/test-results-scratch — never official reports, traces or screenshots
-//   --lock-wait <s>  default 240 (120 for --scratch) · --dry-run  check preconditions + lock, print the plan, no Docker
-// Exit: 0 ok · 1 failure · 3 stack busy (another stack operation holds the lock)
+//   e2e --detach  start the official Playwright run in a background worker (it holds the lock) and return at once —
+//           a full suite outlives the 10-minute command limit of the workflow runner
+//   e2e-wait [--max <s>]  wait up to --max seconds (default 480) for the detached run: its output + exit code when
+//           done, exit 75 "E2E STILL RUNNING" otherwise (call again), exit 4 "E2E WORKER LOST" if the worker died
+//   --lock-wait <s>  default 60 (120 for --scratch) · --dry-run  check preconditions + lock, print the plan, no Docker
+//   ORACUL_E2E_CMD='["cmd","arg"]'  replaces `npx playwright test` (self-test seam; never set it in a real run)
+// Exit: 0 ok · 1 failure · 3 stack busy (another stack operation holds the lock) · 4 worker lost · 75 still running
 import fs from 'node:fs';
 import path from 'node:path';
-import { context, parseArgs, readJson, run, stackLockPath, tail } from '../checks/lib/core.mjs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { context, e2eRunPath, parseArgs, readJson, run, stackLockPath, tail, writeJson } from '../checks/lib/core.mjs';
 import { SCRATCH, e2eEnv, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
-import { acquire } from '../checks/lib/lock.mjs';
+import { acquire, alive } from '../checks/lib/lock.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -23,7 +30,11 @@ const cmd = args._[0];
 if (!ctx.appDir) { console.error('stack: no active app'); process.exit(1); }
 const URLS = { frontend: 'http://localhost:4200', backend: 'http://localhost:8080/actuator/health' };
 const scratch = !!args.scratch;
-const lockWait = args['lock-wait'] !== undefined ? Number(args['lock-wait']) : scratch ? 120 : 240;
+const lockWait = args['lock-wait'] !== undefined ? Number(args['lock-wait']) : scratch ? 120 : 60;
+const appName = ctx.app || path.basename(ctx.appDir);
+const RUN = { status: e2eRunPath(appName, 'json'), log: e2eRunPath(appName, 'log') };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const readLog = () => { try { return fs.readFileSync(RUN.log, 'utf8'); } catch { return ''; } };
 
 function compose(...a) {
   const r = run('docker', ['compose', ...a], { cwd: ctx.appDir });
@@ -52,10 +63,11 @@ async function up() {
   console.log(`UP  frontend ${URLS.frontend}  ·  backend http://localhost:8080/api  ·  health ${URLS.backend}`);
 }
 
-async function locked(name) {
-  const l = await acquire(stackLockPath(ctx.app || path.basename(ctx.appDir)), name, { waitS: lockWait });
+async function locked(name, onBusy = () => {}) {
+  const l = await acquire(stackLockPath(appName), name, { waitS: lockWait });
   if (!l.ok) {
     console.error(`STACK BUSY: ${l.holder.cmd} by pid ${l.holder.pid} since ${l.holder.startedAt}`);
+    onBusy();
     process.exit(3);
   }
   const quit = (code) => () => { l.release(); process.exit(code); };
@@ -74,16 +86,61 @@ function preconditions() {
   return problems;
 }
 
+// Start the official run in a detached worker; return once the worker holds the lock (or is refused).
+async function detach() {
+  writeJson(RUN.status, { state: 'starting', startedAt: new Date().toISOString() });
+  const fd = fs.openSync(RUN.log, 'w');
+  const pass = ['app', 'app-dir', 'phase', 'lock-wait'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, String(args[k])] : []));
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'e2e', '--worker', '--no-up', ...pass], { detached: true, stdio: ['ignore', fd, fd], env: process.env });
+  child.unref();
+  fs.closeSync(fd);
+  const t0 = Date.now();
+  while (Date.now() - t0 < (lockWait + 30) * 1000) {
+    const st = readJson(RUN.status) || {};
+    if (st.state === 'running' || st.state === 'done') { console.log(`E2E STARTED (worker pid ${child.pid}) — log ${RUN.log}; collect with: stack.mjs e2e-wait`); process.exit(0); }
+    if (st.state === 'busy') { console.log(tail(readLog(), 5)); process.exit(3); }
+    if (!alive(child.pid)) { console.log(tail(readLog(), 30)); console.log('E2E WORKER LOST: the worker exited before it started'); process.exit(4); }
+    await sleep(300);
+  }
+  console.log(`E2E WORKER LOST: no start within ${lockWait + 30}s`);
+  process.exit(4);
+}
+
+// Wait for the detached run: its output + exit code when done, 75 while it still runs, 4 if the worker died.
+async function waitRun(maxS) {
+  const t0 = Date.now();
+  for (;;) {
+    const st = readJson(RUN.status);
+    if (!st) { console.error('stack e2e-wait: no detached E2E run (start one with stack.mjs e2e --detach)'); process.exit(1); }
+    if (st.state === 'done') { console.log(tail(readLog(), 70)); process.exit(st.code === 0 ? 0 : 1); }
+    if (st.state === 'busy') { console.log(tail(readLog(), 5)); process.exit(3); }
+    const lost = st.state === 'running' ? !alive(st.pid) : Date.now() - Date.parse(st.startedAt) > 120_000;
+    if (lost) { console.log(tail(readLog(), 30)); console.log(`E2E WORKER LOST: ${st.state === 'running' ? `worker pid ${st.pid} is gone` : 'the worker never started'} — log ${RUN.log}`); process.exit(4); }
+    if ((Date.now() - t0) / 1000 >= maxS) {
+      console.log(tail(readLog(), 3));
+      console.log(`E2E STILL RUNNING (${Math.round((Date.now() - Date.parse(st.startedAt)) / 1000)}s since start) — call stack.mjs e2e-wait again`);
+      process.exit(75);
+    }
+    await sleep(Math.min(5000, Math.max(200, maxS * 1000 - (Date.now() - t0))));
+  }
+}
+
 switch (cmd) {
   case 'up': await locked('up'); if (!args['dry-run']) await up(); break;
   case 'down': await locked('down'); if (!args['dry-run']) { compose('down'); console.log('down'); } break;
   case 'status': console.log(compose('ps')); break;
+  case 'e2e-wait': await waitRun(args.max !== undefined ? Number(args.max) : 480); break;
   case 'e2e': {
     const bad = preconditions();
+    if (args.detach && scratch) bad.push('--detach is for the official run only (scratch runs are scoped and short)');
     if (bad.length) { for (const b of bad) console.error(`stack e2e: ${b}`); process.exit(1); }
-    const l = await locked(scratch ? 'e2e --scratch' : 'e2e');
+    if (args.detach && !args['dry-run']) await detach();
+    const worker = !!args.worker;
+    const l = await locked(scratch ? 'e2e --scratch' : 'e2e', () => worker && writeJson(RUN.status, { state: 'busy', pid: process.pid }));
+    if (worker) writeJson(RUN.status, { state: 'running', pid: process.pid, startedAt: new Date().toISOString() });
     const env = e2eEnv({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, scratch });
     const pwArgs = ['playwright', 'test', ...(scratch ? filterArgs(args.grep) : [])];
+    const override = process.env.ORACUL_E2E_CMD ? JSON.parse(process.env.ORACUL_E2E_CMD) : null;
     if (args['dry-run']) {
       console.log(`DRY RUN (lock held): ${args['no-up'] ? '' : 'docker compose up -d --build && '}npx ${pwArgs.join(' ')}`);
       console.log(Object.entries(env).map(([k, v]) => `  ${k}=${v}`).join('\n'));
@@ -92,15 +149,18 @@ switch (cmd) {
     }
     if (!args['no-up']) await up();
     const e2eDir = path.join(ctx.appDir, 'e2e');
-    const r = run('npx', pwArgs, { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } });
+    const r = override
+      ? run(override[0], override.slice(1), { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } })
+      : run('npx', pwArgs, { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } });
     const block = r.code ? failureBlock(readJson(path.join(e2eDir, scratch ? SCRATCH.report : 'report', 'results.json')), ctx.appDir) : '';
     console.log(tail(r.out, block ? 15 : 60));
     console.log(`${scratch ? 'SCRATCH ' : ''}${r.code ? 'E2E FAIL' : 'E2E PASS'}${scratch ? ' (not evidence — the workflow E2E step decides)' : ''}`);
     if (block) console.log(block);
+    if (worker) writeJson(RUN.status, { state: 'done', code: r.code ? 1 : 0, pid: process.pid, finishedAt: new Date().toISOString() });
     l.release();
     process.exit(r.code ? 1 : 0);
   }
   default:
-    console.error('usage: stack.mjs up|down|status|e2e [--no-up] [--scratch --grep <pattern>] [--lock-wait <s>] [--dry-run]');
+    console.error('usage: stack.mjs up|down|status|e2e|e2e-wait [--no-up] [--detach] [--scratch --grep <pattern>] [--max <s>] [--lock-wait <s>] [--dry-run]');
     process.exit(1);
 }

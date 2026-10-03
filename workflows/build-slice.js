@@ -90,6 +90,7 @@ function infraReason(r) {
   if (isGuardBlock(r)) return 'blocked by guard hook'
   if (r.exitCode === 125) return 'runner returned no exit code'
   if (r.exitCode === 124) return 'timed out'
+  if (r.exitCode === 4 || /E2E WORKER LOST/.test(out)) return 'e2e worker lost'
   return null
 }
 // The command is fenced with more backticks than any run inside it: note() bodies contain ``` blocks, and a plain
@@ -122,13 +123,27 @@ const note = (title, body) => {
   const f = `${sliceDir}/rounds.md`
   return sh(`mkdir -p "${sliceDir}" && n=$(mktemp) && cat > "$n" <<'ORACUL_EOF' && { tail -c "$(($(wc -c < "$n")))" "${f}" 2>/dev/null | cmp -s - "$n" || cat "$n" >> "${f}"; }; rm -f "$n"\n\n## ${title}\n${body}\nORACUL_EOF`, `note ${title}`)
 }
-// Official E2E: subStep e2e (the only subStep the hook lets run Playwright) + the locked stack run, in one command.
-// "stack busy" (another stack operation holds the lock) is rerun once.
+// Official E2E, three kinds of call so none comes near the runner's 10-minute limit (the suite alone took 9.5 min):
+//   1. `set subStep e2e && stack.mjs up` (docker build; subStep e2e is the only one the hook lets run the stack)
+//   2. `stack.mjs e2e --detach` — Playwright starts in a background worker that holds the stack lock
+//   3. `stack.mjs e2e-wait --max 480`, repeated while it answers 75 (still running), up to E2E_WAITS times
+// "stack busy" on 1 or 2 is rerun once; anything else infrastructure-like ends up in infraReason().
+const E2E_WAITS = 8
 async function e2eRun(label) {
-  const cmd = `${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'e2e')}`
-  let r = await sh(cmd, label, { gate: true })
-  if (infraReason(r) === 'stack busy') { log('stack busy — rerunning E2E once'); r = await sh(cmd, `${label} (stack busy, retry)`, { gate: true }) }
-  return r
+  const retryBusy = async (cmd, l) => {
+    let r = await sh(cmd, l, { gate: true })
+    if (infraReason(r) === 'stack busy') { log(`${l}: stack busy — rerunning once`); r = await sh(cmd, `${l} (stack busy, retry)`, { gate: true }) }
+    return r
+  }
+  const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up')}`, `${label}: docker up`)
+  if (up.exitCode !== 0) return up
+  const start = await retryBusy(node('bin/stack.mjs', 'e2e --detach'), `${label}: start Playwright`)
+  if (start.exitCode !== 0) return start
+  for (let i = 1; i <= E2E_WAITS; i++) {
+    const w = await sh(node('bin/stack.mjs', 'e2e-wait --max 480'), `${label}: wait ${i}`, { gate: true })
+    if (w.exitCode !== 75) return w
+  }
+  return { exitCode: 124, output: `E2E still running after ${E2E_WAITS} waits of 480 s` }
 }
 const failureBlock = (out) => (String(out || '').match(/==== E2E FAILURES[\s\S]*?==== END E2E FAILURES ====/) || [''])[0]
 const NO_E2E = 'Do not run Playwright, docker compose or stack.mjs up/down/e2e — the workflow\'s E2E step runs them (hook-enforced). Unit/integration tests (./gradlew test, npm run test:ci) are fine. For E2E failures read the E2E FAILURES block you were given.'

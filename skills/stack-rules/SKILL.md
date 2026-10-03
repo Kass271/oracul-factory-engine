@@ -42,8 +42,11 @@ Every test that proves a requirement carries a comment `// @trace FR-x` (several
 ## Commands the factory uses (from `oracul/`)
 - `node factory-engine/checks/verify.mjs` — builds + tests both layers + all checks (GREEN/RED)
 - `node factory-engine/bin/stack.mjs up|down|status|e2e` — Docker stack and Playwright. `up`, `down` and `e2e` hold the
-  stack lock (`state/apps/<app>/stack.lock`): a second operation waits `--lock-wait <s>` (default 240, 120 for scratch)
+  stack lock (`state/apps/<app>/stack.lock`): a second operation waits `--lock-wait <s>` (default 60, 120 for scratch)
   and then exits **3** `STACK BUSY` — never delete the lock. A failed `e2e` prints an `E2E FAILURES` block last.
+  The workflows run the official E2E as `up`, then `e2e --detach` (Playwright in a background worker that holds the
+  lock), then `e2e-wait --max 480` until it is done: exit 75 = still running (call again), 4 = `E2E WORKER LOST`.
+  So a suite longer than the 10-minute command limit still finishes. Worker status/log: `state/apps/<app>/e2e-run.*`.
   `e2e --scratch --grep <spec file | title pattern>` = the tester's scoped verification run (test-fix only); it writes
   `e2e/report-scratch/` + `e2e/test-results-scratch/`, needs `E2E_REPORT_DIR`/`E2E_OUTPUT_DIR` support in
   `e2e/playwright.config.ts`, and is never evidence. `--dry-run` checks preconditions + lock without Docker.

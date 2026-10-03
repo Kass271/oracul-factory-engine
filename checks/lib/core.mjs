@@ -58,6 +58,8 @@ export const statePath = (app) => path.join(STATE_DIR, 'apps', app, 'state.json'
 export const baselinePath = (app) => path.join(STATE_DIR, 'apps', app, 'baseline', 'coverage.json');
 export const lastRunPath = (app) => path.join(STATE_DIR, 'apps', app, 'last-run.json');
 export const stackLockPath = (app) => path.join(STATE_DIR, 'apps', app, 'stack.lock');
+// Detached E2E run (stack.mjs e2e --detach / e2e-wait): status JSON + log of the background worker.
+export const e2eRunPath = (app, ext) => path.join(STATE_DIR, 'apps', app, `e2e-run.${ext}`);
 export const loadActive = () => readJson(activePath());
 export const loadState = (app) => readJson(statePath(app));
 export const saveState = (app, s) => writeJson(statePath(app), s);

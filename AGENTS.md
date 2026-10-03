@@ -23,7 +23,8 @@ checks/       verify + check-traceability · check-coverage · check-contract ·
               gen-traceability · manifest/artifacts.manifest.json
               lib/ (core, docs parsers, red analysis, lock = stack lock, e2e = scratch env + failure block)
 bin/          state.mjs (only state writer) · env-check · scaffold · red-check · commit
-              stack (Docker + E2E; up/down/e2e hold the stack lock; e2e --scratch = tester's scoped run)
+              stack (Docker + E2E; up/down/e2e hold the stack lock; e2e --detach + e2e-wait = official run beyond
+              the 10-min runner limit; e2e --scratch = tester's scoped run)
 templates/    app/ (skeleton overlay) · docs/ (one template per step document)
 self-test/    run.mjs + fixtures/app-green (red cases are mutations of the green fixture)
 state/        runtime state of generated apps (gitignored)
