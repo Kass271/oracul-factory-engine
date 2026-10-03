@@ -59,9 +59,46 @@ const REVIEW_SCHEMA = {
 }
 
 // Deterministic command runner: executes exactly one command, changes nothing else.
-async function sh(cmd, label) {
+// Gate calls (their exit code decides something) get `echo "ORACUL_EXIT=$?"` appended on its own line, and their exit
+// code is read ONLY from that line — a runner once reported a failure for a command that succeeded. No sentinel → one
+// rerun (every gate command is safe to repeat) → still none → 125 'runner returned no exit code'. A guard refusal or a
+// runner timeout (124) has no sentinel by nature and is never rerun. Kill switch: workflow arg exitSource: 'runner'.
+const SENTINEL_LINE = /\n?ORACUL_EXIT=\d+[^\n]*/g
+const readSentinel = (out) => { const all = [...String(out || '').matchAll(/ORACUL_EXIT=(\d+)/g)]; return all.length ? Number(all.at(-1)[1]) : null }
+const isGuardBlock = (r) => r.exitCode !== 0 && /\[oracul guard\]|PreToolUse:Bash hook error/.test(r.output || '')
+async function sh(cmd, label, opts = {}) {
+  const gate = !!opts.gate && A.exitSource !== 'runner'
+  const full = gate ? `${cmd}\necho "ORACUL_EXIT=$?"` : cmd
+  let r = await runOnce(full, label)
+  if (!gate) return r
+  let code = readSentinel(r.output)
+  if (code === null && r.exitCode !== 124 && !isGuardBlock({ exitCode: r.exitCode || 1, output: r.output })) {
+    log(`${label}: runner returned no exit sentinel — rerunning once`)
+    r = await runOnce(full, `${label} (no exit code, retry)`)
+    code = readSentinel(r.output)
+  }
+  const output = String(r.output || '').replace(SENTINEL_LINE, '')
+  if (code !== null) return { exitCode: code, output }
+  if (r.exitCode === 124) return { exitCode: 124, output }
+  if (/\[oracul guard\]|PreToolUse:Bash hook error/.test(output)) return { exitCode: r.exitCode || 1, output }
+  return { exitCode: 125, output }
+}
+// Infrastructure failures are never code failures: no triage, no fix round. null = a real result.
+function infraReason(r) {
+  const out = r.output || ''
+  if (r.exitCode === 3 || /STACK BUSY/.test(out)) return 'stack busy'
+  if (isGuardBlock(r)) return 'blocked by guard hook'
+  if (r.exitCode === 125) return 'runner returned no exit code'
+  if (r.exitCode === 124) return 'timed out'
+  return null
+}
+// The command is fenced with more backticks than any run inside it: note() bodies contain ``` blocks, and a plain
+// ``` fence ended the command early for the runner model.
+const fenceFor = (cmd) => '`'.repeat(Math.max(3, ...[...String(cmd).matchAll(/`+/g)].map((m) => m[0].length + 1)))
+async function runOnce(cmd, label) {
+  const f = fenceFor(cmd)
   const res = await agent(
-    `Run exactly this shell command from the directory ${A.root} and report the result. Use the Bash tool in the foreground with timeout 600000 (never run_in_background). Do not modify files yourself, do not retry, do not try to fix anything. If the command times out, report exitCode 124.\n\n\`\`\`bash\n${cmd}\n\`\`\`\n\nReturn exitCode (the command's real exit status) and output (the last 80 lines of combined stdout/stderr, verbatim).`,
+    `Run exactly this shell command from the directory ${A.root} and report the result. Use the Bash tool in the foreground with timeout 600000 (never run_in_background). Do not modify files yourself, do not retry, do not try to fix anything. If the command times out, report exitCode 124. The command is everything between the two ${f} fence lines — run all of it, unchanged, as ONE Bash call.\n\n${f}bash\n${cmd}\n${f}\n\nReturn exitCode (the command's real exit status) and output (the last 80 lines of combined stdout/stderr, verbatim).`,
     { label: `run: ${label}`, schema: RUN_SCHEMA, model: 'haiku', effort: 'low' },
   )
   return res || { exitCode: 1, output: 'runner returned nothing' }
@@ -86,15 +123,12 @@ const note = (title, body) => {
   return sh(`mkdir -p "${sliceDir}" && n=$(mktemp) && cat > "$n" <<'ORACUL_EOF' && { tail -c "$(($(wc -c < "$n")))" "${f}" 2>/dev/null | cmp -s - "$n" || cat "$n" >> "${f}"; }; rm -f "$n"\n\n## ${title}\n${body}\nORACUL_EOF`, `note ${title}`)
 }
 // Official E2E: subStep e2e (the only subStep the hook lets run Playwright) + the locked stack run, in one command.
-// Exit 3 / "STACK BUSY" = another stack operation holds the lock — infrastructure, not code: rerun once, never triage.
-const isBusy = (r) => r.exitCode === 3 || /STACK BUSY/.test(r.output || '')
-// A command a PreToolUse hook refused never ran — a factory bug, never a code failure: no triage, no fix round.
-const isGuardBlock = (r) => r.exitCode !== 0 && /\[oracul guard\]|PreToolUse:Bash hook error/.test(r.output || '')
+// "stack busy" (another stack operation holds the lock) is rerun once.
 async function e2eRun(label) {
   const cmd = `${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'e2e')}`
-  let r = await sh(cmd, label)
-  if (isBusy(r)) { log('stack busy — rerunning E2E once'); r = await sh(cmd, `${label} (stack busy, retry)`) }
-  return { ...r, busy: isBusy(r) }
+  let r = await sh(cmd, label, { gate: true })
+  if (infraReason(r) === 'stack busy') { log('stack busy — rerunning E2E once'); r = await sh(cmd, `${label} (stack busy, retry)`, { gate: true }) }
+  return r
 }
 const failureBlock = (out) => (String(out || '').match(/==== E2E FAILURES[\s\S]*?==== END E2E FAILURES ====/) || [''])[0]
 const NO_E2E = 'Do not run Playwright, docker compose or stack.mjs up/down/e2e — the workflow\'s E2E step runs them (hook-enforced). Unit/integration tests (./gradlew test, npm run test:ci) are fine. For E2E failures read the E2E FAILURES block you were given.'
@@ -137,6 +171,9 @@ phase('Green')
 // work.code → builders · work.tests → tester (never the other way round)
 let work = { code: 'Implement the slice until all its RED tests (unit, integration and E2E) pass.', tests: [] }
 let e2eFailures = '' // E2E FAILURES block of the last official run, forwarded unchanged to the next fix round
+// Infrastructure failure (stack busy, guard refusal, runner without exit code, timeout): the gate never judged the
+// code, so the slice is neither triaged nor parked — it STOPS with its code kept, and "continue" resumes it.
+let stopped = null
 while (status === 'GREEN-PENDING' && rounds < MAX) {
   rounds++
   await sh(node('bin/state.mjs', 'round +1'), `round ${rounds}`)
@@ -159,13 +196,8 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
   e2eFailures = ''
 
-  const v = await sh(node('checks/verify.mjs'), `verify r${rounds}`)
-  if (isGuardBlock(v)) {
-    failing = ['verify: blocked by guard hook']
-    feedback = `verify was refused by a PreToolUse hook (factory bug, the command never ran):\n${v.output}`
-    await note(`Round ${rounds}`, `- Trigger: verify refused by the guard hook — factory bug, not triaged\n- Output:\n\n\`\`\`\n${v.output.slice(-1500)}\n\`\`\``)
-    break
-  }
+  const v = await sh(node('checks/verify.mjs'), `verify r${rounds}`, { gate: true })
+  if (infraReason(v)) { stopped = { gate: 'verify', reason: infraReason(v), output: v.output }; break }
   if (v.exitCode !== 0) {
     failing = ['verify']
     feedback = `verify is RED:\n${v.output}`
@@ -175,18 +207,7 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   }
 
   const e = await e2eRun(`docker up + e2e r${rounds}`)
-  if (e.busy) {
-    failing = ['e2e: stack busy']
-    feedback = `Another stack operation held the lock twice in a row (not a code failure):\n${e.output}`
-    await note(`Round ${rounds}`, `- Trigger: E2E could not run — stack busy (lock held by another operation), not triaged\n- Output:\n\n\`\`\`\n${e.output.slice(-1500)}\n\`\`\``)
-    break
-  }
-  if (isGuardBlock(e)) {
-    failing = ['e2e: blocked by guard hook']
-    feedback = `E2E was refused by a PreToolUse hook (factory bug, the command never ran):\n${e.output}`
-    await note(`Round ${rounds}`, `- Trigger: E2E refused by the guard hook — factory bug, not triaged\n- Output:\n\n\`\`\`\n${e.output.slice(-1500)}\n\`\`\``)
-    break
-  }
+  if (infraReason(e)) { stopped = { gate: 'e2e', reason: infraReason(e), output: e.output }; break }
   if (e.exitCode !== 0) {
     failing = ['e2e']
     feedback = `Playwright E2E against the Docker stack failed:\n${e.output}`
@@ -200,7 +221,8 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${rounds}`)
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
   const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. Verify and E2E are GREEN. Write ${sliceDir}/review-findings.json with "round": ${rounds}. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
-  const c = await sh(node('checks/check-review.mjs', `--slice ${S}`), `check-review r${rounds}`)
+  const c = await sh(node('checks/check-review.mjs', `--slice ${S}`), `check-review r${rounds}`, { gate: true })
+  if (infraReason(c)) { stopped = { gate: 'review', reason: infraReason(c), output: c.output }; break }
   if (c.exitCode === 0) { status = 'DONE'; failing = []; break }
   failing = ['review']
   feedback = `Review findings (open high/medium in ${sliceDir}/review-findings.json):\n${c.output}`
@@ -215,6 +237,11 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
     : { code: `${feedback}\nRead the open findings in the file; findings about tests are for the tester — report them in testProblems.`, tests: [] }
   await note(`Round ${rounds}`, `- Trigger: review not clean\n- To builders: ${codeFindings.map((f) => f.id).join(', ') || (open.length ? 'none' : 'all (findings not returned)')} · to tester: ${testFindings.map((f) => f.id).join(', ') || 'none'}\n- ${c.output.split('\n').filter((l) => /INVALID|MISSING/.test(l)).join('\n- ')}`)
 }
+if (stopped) {
+  await note(`Round ${rounds}`, `- Trigger: ${stopped.gate} could not run — ${stopped.reason} (infrastructure, not a code failure). Not triaged, slice STOPPED, code kept in the working tree; "continue" resumes at stage green.\n- Output:\n\n\`\`\`\n${stopped.output.slice(-1500)}\n\`\`\``)
+  await sh(node('bin/state.mjs', 'set subStep green'), 'state → green (stopped)')
+  return { status: 'STOPPED', slice: S, rounds, failing: [`${stopped.gate}: ${stopped.reason}`], output: stopped.output.slice(-1500) }
+}
 if (status === 'GREEN-PENDING') status = 'BLOCKED'
 
 // ---------------------------------------------------------------- Close
@@ -226,7 +253,8 @@ if (status === 'DONE') {
     node('checks/check-coverage.mjs', '--update'),
     node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage done`),
     node('bin/commit.mjs', `--message "${A.phase} ${S}: done (${FRS})"`),
-  ].join(' && '), `close ${S}`)
+  ].join(' && '), `close ${S}`, { gate: true })
+  if (infraReason(close)) return { status: 'STOPPED', slice: S, rounds, failing: [`close: ${infraReason(close)}`], output: close.output.slice(-1500) }
   if (close.exitCode !== 0) { status = 'BLOCKED'; failing = ['close: artifacts/coverage'] ; feedback = close.output }
   else return { status, slice: S, rounds, failing: [], output: close.output.slice(-1500) }
 }

@@ -514,11 +514,22 @@ test('integrity: plugin, agents, skills, hooks, workflows parse', 0, () => {
 });
 
 // ---------------- workflows: build-slice stage contract (stub agents, no real commands)
+// The command inside a runner prompt: between `<fence>bash` and the same fence (the fence is longer than any backtick
+// run in the command).
+const runnerCommand = (p) => { const m = p.match(/(`{3,})bash\n([\s\S]*?)\n\1\n/); return m ? m[2] : ''; };
 async function runWorkflow(file, args, answer, source) {
   const src = (source ?? fs.readFileSync(path.join(ENGINE, 'workflows', file), 'utf8')).replace(/^export const meta/m, 'const meta');
   const AsyncFn = Object.getPrototypeOf(async () => {}).constructor;
   const calls = [];
-  const agent = async (prompt, opts = {}) => { calls.push({ prompt, opts }); return answer(prompt, opts); };
+  // Like a real shell: a gate command ends with `echo "ORACUL_EXIT=$?"`, so its output carries the sentinel — except
+  // when the guard refused it, the runner timed out (124), or the stub returns raw output (runner misbehaviour).
+  const agent = async (prompt, opts = {}) => {
+    calls.push({ prompt, opts });
+    const r = await answer(prompt, opts);
+    if (r && typeof r.exitCode === 'number' && opts.label?.startsWith('run:') && /ORACUL_EXIT=\$\?/.test(prompt) && !r.raw
+      && r.exitCode !== 124 && !/\[oracul guard\]/.test(r.output || '')) return { ...r, output: `${r.output || ''}\nORACUL_EXIT=${r.exitCode}` };
+    return r;
+  };
   const parallel = async (ts) => Promise.all(ts.map((t) => t().catch(() => null)));
   const fn = new AsyncFn('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', src);
   return { result: await fn(agent, parallel, null, () => {}, () => {}, args, null, null), calls };
@@ -526,7 +537,11 @@ async function runWorkflow(file, args, answer, source) {
 const wfArgs = (extra) => ({ engine: ENGINE, root: '/r', app: 'a', appDir: '/r/apps/a', phase: 'phase-01_mvp', phaseDir: '/r/apps/a/docs/phase-01_mvp', slice: '01_rooms', frs: ['FR-1'], ...extra });
 const ok0 = (p, o) => (o.schema && o.schema.required?.includes('exitCode') ? { exitCode: 0, output: '{"slice":"01_rooms","decision":"CONTINUE","dependents":[]}' } : o.schema ? { summary: '', testProblems: [], open: [], code: '', tests: [] } : 'done');
 const asyncCases = [];
-const wf = (name, expectCode, args, answer, judge) => { if (!filter || name.includes(filter)) asyncCases.push({ name, expectCode, args, answer, judge }); };
+let wfStarted = false; // wf() after the run loop would be silently skipped — it throws instead
+const wf = (name, expectCode, args, answer, judge) => {
+  if (wfStarted) throw new Error(`wf('${name}') registered after the workflow cases ran — move it up`);
+  if (!filter || name.includes(filter)) asyncCases.push({ name, expectCode, args, answer, judge });
+};
 wf('workflow red: build-slice without stage', 1, wfArgs({}), ok0, ({ result }) => (result.error ? 1 : 0));
 wf('workflow red: build-slice green without red-check result', 1, wfArgs({ stage: 'green' }), ok0, ({ result }) => (result.error ? 1 : 0));
 wf('workflow green: stage red never runs red-check itself', 0, wfArgs({ stage: 'red' }), ok0,
@@ -569,21 +584,46 @@ wf('workflow green: every official e2e run sets subStep e2e right before it', 0,
   return runs.length && runs.every((c) => { const i = c.prompt.indexOf('set subStep e2e'); return i >= 0 && i < c.prompt.indexOf('stack.mjs" e2e'); }) ? 0 : 1;
 });
 const busyThen = (busyTimes) => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) ? (n++ < busyTimes ? { exitCode: 3, output: 'STACK BUSY: e2e by pid 42 since x' } : { exitCode: 0, output: 'E2E PASS' }) : ok0(p, o)); };
+const verifyAs = (fn) => (p, o) => (/checks\/verify\.mjs"/.test(p) ? fn(p, o) : ok0(p, o));
+const triaged = (calls) => calls.some((c) => /^triage/.test(c.opts.label || ''));
+wf('workflow green: runner says 1 but the sentinel says 0 → verify GREEN, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  verifyAs(() => ({ exitCode: 1, output: 'node: something: No such file or directory\nORACUL_EXIT=0', raw: true })), ({ result, calls }) => (result.status === 'DONE' && !triaged(calls) ? 0 : 1));
+wf('workflow red: runner says 0 but the sentinel says 1 → verify RED, triaged', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }),
+  verifyAs(() => ({ exitCode: 0, output: 'FAIL backend\nORACUL_EXIT=1', raw: true })), ({ calls }) => (triaged(calls) ? 1 : 0));
+wf('workflow red: no sentinel twice → STOPPED "verify: runner returned no exit code", no triage, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  verifyAs(() => ({ exitCode: 0, output: 'looks fine', raw: true })), ({ result, calls }) =>
+    (result.status === 'STOPPED' && result.failing.includes('verify: runner returned no exit code') && !triaged(calls) && !parked(calls)
+      && calls.filter((c) => /checks\/verify\.mjs"/.test(c.prompt)).length === 2 ? 1 : 0));
+wf('workflow green: no sentinel once, then present → normal, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
+  let n = 0;
+  return verifyAs(() => (n++ ? { exitCode: 0, output: 'GREEN' } : { exitCode: 0, output: 'truncated', raw: true }));
+})(), ({ result, calls }) => (result.status === 'DONE' && calls.filter((c) => /checks\/verify\.mjs"/.test(c.prompt)).length === 2 ? 0 : 1));
+wf('workflow red: runner timeout 124 → STOPPED "verify: timed out", not rerun, no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  verifyAs(() => ({ exitCode: 124, output: 'BUILD …' })), ({ result, calls }) =>
+    (result.status === 'STOPPED' && result.failing.includes('verify: timed out') && !triaged(calls)
+      && calls.filter((c) => /checks\/verify\.mjs"/.test(c.prompt)).length === 1 ? 1 : 0));
+wf('workflow green: exitSource "runner" restores the old behaviour (runner exitCode, no sentinel appended)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, exitSource: 'runner', maxRounds: 1 }),
+  verifyAs(() => ({ exitCode: 1, output: 'ORACUL_EXIT=0', raw: true })), ({ calls }) =>
+    (triaged(calls) && !calls.some((c) => /ORACUL_EXIT=\$\?/.test(c.prompt)) ? 0 : 1));
+wf('workflow red: close chain without exit code → STOPPED "close: …", slice not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (/commit\.mjs"/.test(p) && /slice 01_rooms DONE/.test(p) ? { exitCode: 0, output: '', raw: true } : ok0(p, o)), ({ result, calls }) =>
+    (result.status === 'STOPPED' && result.failing.includes('close: runner returned no exit code') && !parked(calls) ? 1 : 0));
 const between = (calls, from, to) => calls.slice(from + 1, to);
 wf('workflow green: stack busy once → rerun, no fix round, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(1), ({ result, calls }) => {
   const idx = calls.map((c, i) => (/stack\.mjs" e2e/.test(c.prompt) ? i : -1)).filter((i) => i >= 0);
   const mid = between(calls, idx[0], idx[1]);
   return result.status === 'DONE' && idx.length === 2 && !mid.some((c) => /^(triage|tester|backend|frontend)/.test(c.opts.label || '')) ? 0 : 1;
 });
-wf('workflow red: stack busy twice → BLOCKED "e2e: stack busy", never triaged', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(2), ({ result, calls }) =>
-  (result.status === 'BLOCKED' && result.failing.includes('e2e: stack busy') && !calls.some((c) => /^triage/.test(c.opts.label || '')) ? 1 : 0));
+wf('workflow red: stack busy twice → STOPPED "e2e: stack busy", never triaged, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(2), ({ result, calls }) =>
+  (result.status === 'STOPPED' && result.failing.includes('e2e: stack busy') && !calls.some((c) => /^triage/.test(c.opts.label || '')) && !parked(calls) ? 1 : 0));
 const GUARD_OUT = 'PreToolUse:Bash hook error: [node "/e/hooks/guard-edits.mjs"]: [oracul guard] `node "/e/bin/stack.mjs" e2e` is a stack operation: …'
 const refuse = (re) => (p, o) => (re.test(p) ? { exitCode: 1, output: GUARD_OUT } : ok0(p, o));
+const parked = (calls) => calls.some((c) => /checkout HEAD -- backend|slice 01_rooms BLOCKED/.test(c.prompt));
 const oneRoundNoTriage = (calls) => !calls.some((c) => /^triage/.test(c.opts.label || '')) && !calls.some((c) => / r2$/.test(c.opts.label || ''));
-wf('workflow red: E2E refused by the guard → BLOCKED "e2e: blocked by guard hook", never triaged, one round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/stack\.mjs" e2e/), ({ result, calls }) =>
-  (result.status === 'BLOCKED' && result.failing.includes('e2e: blocked by guard hook') && oneRoundNoTriage(calls) ? 1 : 0));
-wf('workflow red: verify refused by the guard → BLOCKED "verify: blocked by guard hook", never triaged, one round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/checks\/verify\.mjs"/), ({ result, calls }) =>
-  (result.status === 'BLOCKED' && result.failing.includes('verify: blocked by guard hook') && oneRoundNoTriage(calls) ? 1 : 0));
+wf('workflow red: E2E refused by the guard → STOPPED "e2e: blocked by guard hook", never triaged, one round, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/stack\.mjs" e2e/), ({ result, calls }) =>
+  (result.status === 'STOPPED' && result.failing.includes('e2e: blocked by guard hook') && oneRoundNoTriage(calls) && !parked(calls) ? 1 : 0));
+wf('workflow red: verify refused by the guard → STOPPED "verify: blocked by guard hook", never triaged, one round, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/checks\/verify\.mjs"/), ({ result, calls }) =>
+  (result.status === 'STOPPED' && result.failing.includes('verify: blocked by guard hook') && oneRoundNoTriage(calls) && !parked(calls) ? 1 : 0));
 wf('workflow green: a real E2E failure is still triaged (not mistaken for a guard block)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
   let n = 0;
   return (p, o) => (/stack\.mjs" e2e/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL\n  1 failed: rooms.spec.ts' } : ok0(p, o));
@@ -600,7 +640,12 @@ wf('workflow green: E2E FAILURES block reaches the next fix round; builders told
   return result.status === 'DONE' && be2 && be2.prompt.includes(BLOCK) && !be1.prompt.includes('E2E FAILURES ====')
     && /Do not run Playwright/.test(be1.prompt) && greenBeforeTriage ? 0 : 1;
 });
+wf('workflow green: a note() with ``` blocks is fenced so the runner sees the whole command', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)); })(), ({ calls }) => {
+  const n = calls.find((c) => c.opts.label === 'run: note Round 1');
+  return n && /```/.test(runnerCommand(n.prompt)) && /ORACUL_EOF$/.test(runnerCommand(n.prompt)) ? 0 : 1;
+});
 for (const c of asyncCases) {
+  wfStarted = true;
   let got, note = '';
   try { got = c.judge(await runWorkflow('build-slice.js', c.args, c.answer)); } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name: c.name, ok: got === c.expectCode, expectCode: c.expectCode, got, note, out: '' });
@@ -613,7 +658,7 @@ const noteCommands = async () => {
   const cmds = [];
   let v = 0;
   await runWorkflow('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, phaseDir: dir, maxRounds: 2 }), (p, o) => {
-    if (o.label?.startsWith('run: note')) cmds.push((p.match(/```bash\n([\s\S]*?)\n```/) || [])[1]);
+    if (o.label?.startsWith('run: note')) cmds.push(runnerCommand(p));
     return /checks\/verify\.mjs"/.test(p) ? { exitCode: 1, output: `verify RED #${++v}` } : ok0(p, o);
   });
   return { dir, cmds: cmds.filter(Boolean) };
@@ -670,21 +715,41 @@ for (const t of asyncTests) {
 
 // Replay: every command a workflow runs must pass the real guard hook in the subStep the workflow itself set before it
 // (the hook runs BEFORE a command, so a chained `set subStep x && …` is judged segment by segment).
-async function replayThroughHook(file, args, answer, source) {
+const NEEDS_TOOLS = /checks\/verify\.mjs"|bin\/stack\.mjs"|gradlew|red-check\.mjs"/;
+const SHELL_ERROR = /syntax error|unexpected end of file|here-document .*delimited by end-of-file|command not found|unbound variable/;
+async function replayThroughHook(file, args, answer, source, { execute = false } = {}) {
   const sb = sandbox();
   sb.state({ step: file === 'build-slice.js' ? '04_build' : '05_release', slice: '01_rooms', subStep: 'green' });
+  if (execute) { // commit.mjs needs a repo
+    spawnSync('git', ['init', '-q'], { cwd: sb.appDir });
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init', '--allow-empty'], { cwd: sb.appDir });
+  }
   const blocked = [];
+  const executed = [];
   const { result } = await runWorkflow(file, { ...args, engine: ENGINE, root: sb.root, appDir: sb.appDir, phaseDir: sb.doc('') }, (p, o) => {
     if (o.label?.startsWith('run:')) {
-      const cmd = (p.match(/```bash\n([\s\S]*?)\n```/) || [])[1] || '';
+      const cmd = runnerCommand(p);
       const h = hook(sb, 'guard-edits', { tool_name: 'Bash', tool_input: { command: cmd } });
       if (h.code !== 0) blocked.push(`${o.label}: ${h.out.trim().slice(0, 160)}`);
+      if (execute && h.code === 0 && !NEEDS_TOOLS.test(cmd)) {
+        const x = spawnSync('bash', ['-c', cmd], { cwd: sb.root, env: sb.env, encoding: 'utf8' });
+        const out = (x.stdout || '') + (x.stderr || '');
+        const gate = /ORACUL_EXIT=\$\?/.test(cmd);
+        executed.push(o.label);
+        if (SHELL_ERROR.test(x.stderr || '')) blocked.push(`${o.label}: shell error: ${(x.stderr || '').trim().slice(0, 160)}`);
+        if (o.label.startsWith('run: note ')) { // bash 3.2 accepts a broken heredoc silently — check what landed in the file
+          const title = o.label.slice('run: note '.length);
+          const rounds = sb.read('docs/phase-01_mvp/04_build/01_rooms/rounds.md') || '';
+          if (!rounds.includes(`## ${title}`) || /ORACUL_EO/.test(rounds)) blocked.push(`${o.label}: shell error: note did not land cleanly in rounds.md`);
+        }
+        else if (gate && !/ORACUL_EXIT=\d+\s*$/.test(out.trimEnd() + '\n')) blocked.push(`${o.label}: gate printed no ORACUL_EXIT as its last line`);
+      }
       for (const m of cmd.matchAll(/set subStep (\S+)/g)) sb.state({ subStep: m[1] });
     }
     return answer(p, o);
   }, source);
   fs.rmSync(sb.root, { recursive: true, force: true });
-  return { result, blocked };
+  return { result, blocked, executed };
 }
 const e2eFailsOnce = () => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) && !n++ ? { exitCode: 1, output: `E2E FAIL\n${BLOCK}` } : ok0(p, o)); };
 for (const [name, file, args] of [
@@ -696,6 +761,55 @@ for (const [name, file, args] of [
   let got, note = '';
   try { const r = await replayThroughHook(file, args, e2eFailsOnce()); got = r.blocked.length ? 1 : 0; note = r.blocked.join(' | '); } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
+}
+// EXECUTING replay: every command that needs no Docker/Gradle runs for real in bash in the sandbox — no shell errors,
+// and every gate command ends with its ORACUL_EXIT line.
+for (const [name, file, args] of [
+  ['executing replay green: build-slice green stage runs cleanly in bash', 'build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } })],
+  ['executing replay green: build-slice red stage runs cleanly in bash', 'build-slice.js', wfArgs({ stage: 'red' })],
+  ['executing replay green: finish-and-run runs cleanly in bash', 'finish-and-run.js', relArgs],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try {
+    const r = await replayThroughHook(file, args, e2eFailsOnce(), undefined, { execute: true });
+    got = r.blocked.length || !r.executed.length ? 1 : 0;
+    note = r.blocked.join(' | ') || `${r.executed.length} commands executed`;
+  } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
+}
+{
+  const name = 'executing replay red: a note() with a broken heredoc is caught';
+  if (!filter || name.includes(filter)) {
+    let got, note = '';
+    try {
+      const src = fs.readFileSync(path.join(ENGINE, 'workflows', 'build-slice.js'), 'utf8');
+      const mutated = src.replace("\\n${body}\\nORACUL_EOF`, `note ${title}`)", "\\n${body}\\nORACUL_EO`, `note ${title}`)");
+      if (mutated === src) throw new Error('mutation did not apply — update this case');
+      const r = await replayThroughHook('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsOnce(), mutated, { execute: true });
+      got = r.blocked.some((b) => /shell error/.test(b)) ? 1 : 0;
+      note = r.blocked[0] || 'nothing caught';
+    } catch (e) { got = 'ERR'; note = String(e); }
+    results.push({ name, ok: got === 1, expectCode: 1, got, note, out: '' });
+  }
+}
+{
+  const name = 'runner fence red: a plain ``` fence cuts a note command short';
+  if (!filter || name.includes(filter)) {
+    const cmd = "cat <<'ORACUL_EOF'\n- Output:\n\n```\nlog\n```\nORACUL_EOF";
+    const cut = (`\`\`\`bash\n${cmd}\n\`\`\`\n`.match(/```bash\n([\s\S]*?)\n```/) || [])[1];
+    results.push({ name, ok: cut !== cmd, expectCode: 1, got: cut !== cmd ? 1 : 0, note: 'plain fence ends at the inner ```', out: '' });
+  }
+}
+// The sentinel reports the status of the whole && chain, including non-node commands (git) — real bash.
+for (const [name, cmd, want] of [
+  ['sentinel green: successful chain → ORACUL_EXIT=0', 'true && true\necho "ORACUL_EXIT=$?"', 0],
+  ['sentinel red: git failing mid-chain → ORACUL_EXIT=128, not the earlier success', 'true && git -C /nonexistent-oracul status && true\necho "ORACUL_EXIT=$?"', 128],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  const x = spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
+  const m = (x.stdout.match(/ORACUL_EXIT=(\d+)\s*$/) || [])[1];
+  results.push({ name, ok: Number(m) === want, expectCode: want, got: m === undefined ? 'none' : Number(m), note: '', out: '' });
 }
 { // red counterpart: a workflow that runs E2E without switching to subStep e2e is caught by the replay
   const name = 'replay red: E2E run while still in subStep green is caught';

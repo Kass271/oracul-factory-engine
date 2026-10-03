@@ -31,7 +31,7 @@ Below, `$E` = engine path, `$APP` = appDir, `$PD` = phaseDir. Agents: subagent t
 - … and an active app exists → ask once: "Add this as the next phase of `<app>`, or create a new app?"
   - next phase → `node $E/bin/state.mjs phase new <short-name>`, then Step 0 (phase 02+ variant).
   - new app → Step 0 with a new name.
-- **"continue"** → resume at the current `step`/`subStep`. Slice IN_PROGRESS: subStep `spec` → from stage `red`;
+- **"continue"** → resume at the current `step`/`subStep` (a STOPPED slice is IN_PROGRESS). Slice IN_PROGRESS: subStep `spec` → from stage `red`;
   `red` → from red-check (Step 4.2); `test-fix`/`green`/`e2e`/`review` → stage `green` with `red: { exitCode: 0, output: "resumed" }`
   (the earlier red-evidence.md is still checked at close).
 
@@ -84,6 +84,8 @@ Loop:
 1. `node $E/bin/state.mjs next-slice --json` → `{next, frs, skippedBecauseBlocked}`. `next` = null → Step 5.
 2. The slice runs in two workflow stages with red-check between them, which **you** run as a direct command.
    `B` = `scriptPath: <workflows.buildSlice>`, base args `{ engine, root, app, appDir, phase, phaseDir, slice: next, frs }`
+   Gate exit codes come from an `ORACUL_EXIT=<n>` line the gate command prints itself, not from the runner's report.
+   Emergency fallback only (if gates misbehave after an engine update): add `exitSource: "runner"` to the args.
    (pass args as a JSON object). If a stage returns `{error}`, the args did not arrive — rerun once; never treat it as a pass.
    1. `B` with `stage: "red"` — analyst spec delta (incl. `Changes earlier behaviour` and `Ranges & invariants` per FR)
       + tester writes the RED tests, updates superseded tests and self-checks them with red-check.
@@ -97,6 +99,11 @@ Loop:
       exitCode it writes the failure note and returns BLOCKED; otherwise builders → verify → E2E → review, up to 5 fix rounds.
       In fix rounds, failures caused by tests and review findings about tests go to the tester; the builders keep the code.
 3. Result `DONE` → one-line progress message to the user, continue.
+   Result `STOPPED` → an infrastructure failure, not a code failure: `failing` names it (`<gate>: stack busy |
+   blocked by guard hook | runner returned no exit code | timed out | e2e worker lost`). Nothing was triaged or
+   parked; the slice is still IN_PROGRESS with its code in the working tree. Stop the phase, tell the user the reason
+   and the slice, and ask them to fix the cause. "continue" then resumes the slice at stage `green`
+   (red: { exitCode: 0, output: "resumed" }). Never delete `state/apps/<app>/stack.lock` yourself.
    Result `BLOCKED` with `decision: "CONTINUE"` → tell the user (slice, FRs not delivered, failure note path), continue.
    Result `BLOCKED` with `decision: "STOP"` → stop the phase; report the failure note and the dependent slices; ask the user how to proceed.
 4. A slice BLOCKED with `failing: ["e2e: stack busy"]` was not a code failure: another stack operation held the lock
