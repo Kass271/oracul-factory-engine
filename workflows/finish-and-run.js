@@ -171,21 +171,26 @@ const report = { status: 'GREEN', rounds: 0, problems: [] }
 phase('Verify + Review')
 await sh(`${node('bin/state.mjs', 'set step 05_release')} && ${node('bin/state.mjs', 'set slice none')} && ${node('bin/state.mjs', 'set subStep none')}`, 'state → 05_release')
 let clean = false
+let infraStop = null // verify/review could not run: E2E, QA and the release commit would only add noise
 for (let r = 1; r <= MAX && !clean; r++) {
   report.rounds = r
   const v = await sh(node('checks/verify.mjs', '--scope all'), `verify all r${r}`, { gate: true })
-  if (infraReason(v)) { report.problems = [`verify: ${infraReason(v)}`]; break }
+  if (infraReason(v)) { infraStop = `verify: ${infraReason(v)}`; break }
   if (v.exitCode !== 0) { if (r < MAX) await fix(r, await triage('verify --scope all', v.output, r)); report.problems = ['verify']; continue }
   await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${r}`)
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
   const rv = await role('reviewer', `${CTX}\n\nRelease review (whole app, all phases), round ${r}. Write ${rel}/review-findings.json with "slice": "release", "round": ${r}. Focus on cross-slice integration, error handling, security, and FRs that may have regressed. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: release r${r}`, REVIEW_SCHEMA)
   const c = await sh(node('checks/check-review.mjs', '--release'), `check-review release r${r}`, { gate: true })
-  if (infraReason(c)) { report.problems = [`release review: ${infraReason(c)}`]; break }
+  if (infraReason(c)) { infraStop = `release review: ${infraReason(c)}`; break }
   if (c.exitCode === 0) { clean = true; report.problems = []; break }
   report.problems = ['release review']
   if (r < MAX) await fix(r, routeReview(rv, c.output))
 }
 if (!clean) report.status = 'RED'
+if (infraStop) {
+  log(`release stopped early: ${infraStop} (infrastructure) — E2E, QA and the release commit skipped`)
+  return { ...report, status: 'RED', problems: [infraStop], stoppedEarly: true }
+}
 
 // ---------------------------------------------------------------- Run + E2E
 phase('Run + E2E')

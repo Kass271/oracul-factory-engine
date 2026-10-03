@@ -749,6 +749,23 @@ for (const [name, expectCode, answer, problem] of [
   } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
 }
+for (const [name, expectCode, answer] of [
+  ['workflow red: release verify refused by the guard → stops early: no E2E, no QA, no release commit', 1, () => refuse(/checks\/verify\.mjs" --scope all/)],
+  ['workflow green: clean release runs verify → review → E2E → QA → commit in order', 0, () => ok0],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try {
+    const { result, calls } = await runWorkflow('finish-and-run.js', relArgs, answer());
+    const at = (re) => calls.findIndex((c) => re.test(c.prompt) || re.test(c.opts.label || ''));
+    const idx = [/checks\/verify\.mjs" --scope all/, /check-review\.mjs" --release/, /stack\.mjs" e2e-wait/, /^qa-documenter/, /commit\.mjs" --message ".* 05_release/].map(at);
+    const ranAll = idx.every((i) => i >= 0) && idx.every((v, i) => i === 0 || v > idx[i - 1]);
+    const ranNone = idx.slice(2).every((i) => i < 0);
+    got = result.stoppedEarly && result.status === 'RED' && ranNone ? 1 : !result.stoppedEarly && result.status === 'GREEN' && ranAll ? 0 : 'other';
+    if (got === 'other') note = `${JSON.stringify(idx)} ${JSON.stringify(result).slice(0, 200)}`;
+  } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
+}
 for (const [name, expectCode, busyTimes] of [['workflow red: release stack busy twice → RED "e2e: stack busy", never triaged', 1, 2], ['workflow green: release stack busy once → rerun, GREEN', 0, 1]]) {
   if (filter && !name.includes(filter)) continue;
   let got, note = '';
