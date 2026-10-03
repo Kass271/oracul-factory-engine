@@ -132,7 +132,39 @@ for (const a of [['set', 'step', '05_release'], ['set', 'slice', 'none']]) sh('b
 step('release verify --scope all', 0, () => sh('checks/verify.mjs', ['--scope', 'all']));
 copy(path.join(SMOKE, 'release', 'review-findings.json'), path.join(docs('05_release'), 'review-findings.json'));
 step('release review clean', 0, () => sh('checks/check-review.mjs', ['--release']));
-step('Docker stack up + Playwright E2E with screenshot evidence', 0, () => sh('bin/stack.mjs', ['e2e']));
+// Official E2E exactly as the workflows run it: subStep e2e, up, Playwright in a detached worker, e2e-wait until done.
+const STACK = path.join(ENGINE, 'bin', 'stack.mjs');
+const bashHook = (command) => hook('guard-edits', { tool_name: 'Bash', tool_input: { command } });
+step('E2E: guard allows up / detach / wait in subStep e2e', 0, () => {
+  sh('bin/state.mjs', ['set', 'subStep', 'e2e']);
+  for (const c of ['up', 'e2e --detach', 'e2e-wait --max 480']) { const r = bashHook(`node "${STACK}" ${c}`); if (r.code) return r; }
+  return { code: 0, out: '' };
+});
+step('E2E: Docker stack up (own call, under the lock)', 0, () => sh('bin/stack.mjs', ['up']));
+step('E2E: Playwright starts in a detached worker', 0, () => sh('bin/stack.mjs', ['e2e', '--detach']));
+step('E2E: e2e-wait until done (75 = still running) — PASS with screenshot evidence', 0, () => {
+  let r;
+  for (let i = 0; i < 8; i++) { r = sh('bin/stack.mjs', ['e2e-wait', '--max', '480']); if (r.code !== 75) break; }
+  return r.code === 0 && /E2E PASS/.test(r.out) ? r : { code: r.code || 1, out: r.out };
+});
+step('E2E: stack lock released after the detached run', 0, () => ({ code: fs.existsSync(path.join(root, 'state', 'apps', APP, 'stack.lock')) ? 1 : 0, out: 'stack.lock still present' }));
+step('gate sentinel in real bash: last line is ORACUL_EXIT=<status of the chain>', 0, () => {
+  const cmd = `node "${path.join(ENGINE, 'checks', 'check-review.mjs')}" --release && git -C "${appDir}" status --short >/dev/null\necho "ORACUL_EXIT=$?"`;
+  const x = spawnSync('bash', ['-c', cmd], { env, cwd: root, encoding: 'utf8' });
+  return { code: /ORACUL_EXIT=0\s*$/.test(x.stdout) ? 0 : 1, out: x.stdout + x.stderr };
+});
+step('scratch run (test-fix): scoped by spec file, official report untouched', 0, () => {
+  sh('bin/state.mjs', ['set', 'subStep', 'test-fix']);
+  const allowed = bashHook(`node "${STACK}" e2e --scratch --grep todos.spec.ts`);
+  if (allowed.code) return allowed;
+  const official = path.join(appDir, 'e2e', 'report', 'results.json');
+  const before = fs.readFileSync(official, 'utf8');
+  const r = sh('bin/stack.mjs', ['e2e', '--scratch', '--grep', 'todos.spec.ts', '--no-up']);
+  const scratch = JSON.parse(fs.readFileSync(path.join(appDir, 'e2e', 'report-scratch', 'results.json'), 'utf8'));
+  const ok = r.code === 0 && fs.readFileSync(official, 'utf8') === before && scratch.stats?.expected > 0;
+  sh('bin/state.mjs', ['set', 'subStep', 'none']);
+  return ok ? r : { code: 1, out: `${r.out}\nscratch stats ${JSON.stringify(scratch.stats)} · official changed: ${fs.readFileSync(official, 'utf8') !== before}` };
+});
 step('gen-traceability: every FR ✔', 0, () => sh('checks/gen-traceability.mjs'));
 step('Step 5 gate says NO before the QA pack exists', 1, () => sh('checks/check-artifacts.mjs', ['--step', '05_release']));
 copy(path.join(SMOKE, 'release', 'qa'), path.join(docs('05_release'), 'qa'));

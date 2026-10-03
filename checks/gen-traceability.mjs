@@ -28,10 +28,13 @@ if (exists(junitDir)) {
 }
 
 const pw = readJson(at('e2e/report/results.json'));
+// Playwright records rootDir as a real path; the app path may run through a symlink (macOS /var → /private/var).
+const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+const pwRoot = pw?.config?.rootDir ? path.relative(real(at('e2e')), real(pw.config.rootDir)).split(path.sep).join('/') : 'tests';
 const walkSuites = (s) => {
   for (const spec of s.specs || []) {
     const ok = (spec.tests || []).every((t) => ['expected', 'flaky'].includes(t.status));
-    set(`e2e/${path.posix.join(pw.config?.rootDir ? path.relative(at('e2e'), pw.config.rootDir).split(path.sep).join('/') : 'tests', spec.file)}`, ok);
+    set(`e2e/${path.posix.join(pwRoot, spec.file)}`, ok);
   }
   (s.suites || []).forEach(walkSuites);
 };

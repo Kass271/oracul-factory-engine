@@ -253,6 +253,20 @@ test('gen-traceability red: failing test → ✘ + exit 1', 1, (sb) => {
   return node(sb, 'checks/gen-traceability.mjs');
 }, (sb) => /\| FR-1 \|.*\| ✘ \|/.test(sb.read('docs/phase-01_mvp/05_release/qa/traceability.md')) || 'FR-1 not ✘');
 
+const lastRunOk = (sb) => sb.put('../../state/apps/fixture/last-run.json', JSON.stringify({ layers: { backend: { exit: 0 }, frontend: { exit: 0 } } }));
+test('gen-traceability green: Playwright rootDir reached through a symlink still maps the E2E tests', 0, (sb) => {
+  lastRunOk(sb);
+  fs.symlinkSync(sb.p('e2e'), sb.p('e2e-link'));
+  sb.edit('e2e/report/results.json', sb.p('e2e/tests'), sb.p('e2e-link/tests'));
+  return node(sb, 'checks/gen-traceability.mjs');
+}, (sb) => /rooms\.spec\.ts` \(pass\)/.test(sb.read('docs/phase-01_mvp/05_release/qa/traceability.md')) || 'e2e test not mapped');
+test('gen-traceability red: Playwright rootDir elsewhere → E2E test unknown → ✘', 1, (sb) => {
+  lastRunOk(sb);
+  fs.mkdirSync(sb.p('other/tests'), { recursive: true });
+  sb.edit('e2e/report/results.json', sb.p('e2e/tests'), sb.p('other/tests'));
+  return node(sb, 'checks/gen-traceability.mjs');
+});
+
 // ---------------- state tool
 test('state: init → phase new → approve → slices → next-slice → impact', 0, (sb) => {
   fs.rmSync(sb.stateDir, { recursive: true, force: true });
