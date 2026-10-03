@@ -6,6 +6,10 @@
 //   - subStep test-fix: production code and api/openapi.yaml (tester repairs tests in a fix round)
 //   - subStep green:  tests and api/openapi.yaml (builders never change tests or the contract)
 //   - subStep review: anything outside docs/ (reviewer only reports)
+//   - Bash in subSteps red/green/test-fix/review: running Playwright or changing the Docker stack (docker compose
+//     up/down/…, docker stop/rm/…, stack.mjs up/down/e2e). E2E runs only in the workflow's E2E step (subStep e2e),
+//     serialised by the stack lock; the one exception is the tester's scoped scratch run in test-fix:
+//     `stack.mjs e2e --scratch --grep <pattern>`. Reading/searching, unit tests and `stack.mjs status` stay allowed.
 import path from 'node:path';
 import { active, block, inside, isEngine, kind, readInput } from './lib.mjs';
 
@@ -32,7 +36,49 @@ if (tool === 'Bash') {
     if (tok[0] === 'sed' && tok.includes('-i') && isEng(args.at(-1))) deny();
     if (tok[0] === 'mv' && args.slice(0, -1).some(isEng)) deny();
   }
+  const a = active();
+  if (a && ['red', 'green', 'test-fix', 'review'].includes(a.state.subStep)) {
+    const why = stackViolation(c, cwd, a.state.subStep);
+    if (why) block(`${why}: E2E and the Docker stack run only in the workflow's E2E step (subStep e2e). In a test-fix round the tester may verify a repair with: node <engine>/bin/stack.mjs e2e --scratch --grep <spec file>.`);
+  }
   process.exit(0);
+}
+
+// First reason a command would run Playwright or change the Docker stack outside the lock, else null.
+function stackViolation(command, startDir, sub) {
+  let dir = startDir;
+  for (const seg of command.split(/&&|\|\||[|;&\n]/)) {
+    let tok = seg.trim().split(/\s+/).filter(Boolean).map((t) => t.replace(/^["']|["']$/g, ''));
+    while (tok.length && (/^\w+=/.test(tok[0]) || tok[0] === 'env' || tok[0] === 'exec' || tok[0] === 'time')) tok = tok.slice(1);
+    if (tok[0] === 'timeout') tok = tok.slice(1).filter((t, i) => i > 0 || !/^\d/.test(t));
+    if (!tok.length) continue;
+    const [c0, c1] = tok;
+    if (c0 === 'cd') { dir = path.resolve(dir, tok[1] || '.'); continue; }
+    const runner = ['npx', 'pnpx', 'bunx', 'yarn', 'pnpm'].includes(c0);
+    const pw = tok.findIndex((t) => /(^|\/)playwright$/.test(t));
+    if (pw >= 0 && (pw === 0 || runner) && ['test', 'install'].includes(tok[pw + 1])) return `\`${seg.trim()}\` runs Playwright`;
+    const pi = tok.findIndex((t) => t === '--prefix' || t.startsWith('--prefix='));
+    const prefix = pi < 0 ? null : tok[pi].includes('=') ? tok[pi].split('=')[1] : tok[pi + 1];
+    const npmCmd = c0 === 'npm' && tok.slice(1).find((t, i) => !t.startsWith('-') && !(pi >= 0 && !tok[pi].includes('=') && i + 1 === pi + 1));
+    if (c0 === 'npm' && ['run', 'run-script', 'test', 't', 'start', 'exec', 'x'].includes(npmCmd)) {
+      if ((prefix && /(^|\/)e2e\/?$/.test(prefix)) || (!prefix && /(^|\/)e2e$/.test(dir))) return `\`${seg.trim()}\` runs the E2E package`;
+    }
+    const compose = c0 === 'docker-compose' ? tok.slice(1) : c0 === 'docker' && c1 === 'compose' ? tok.slice(2) : null;
+    if (compose && compose.some((t) => ['up', 'down', 'build', 'restart', 'rm', 'stop', 'start', 'kill', 'create', 'run'].includes(t))) return `\`${seg.trim()}\` changes the Docker stack`;
+    if (c0 === 'docker' && ['stop', 'rm', 'kill', 'restart', 'start', 'run'].includes(c1)) return `\`${seg.trim()}\` changes Docker containers`;
+    const st = tok.findIndex((t) => /(^|\/)stack\.mjs$/.test(t));
+    if (st >= 0) {
+      const rest = tok.slice(st + 1);
+      const action = rest.find((t) => !t.startsWith('-'));
+      if (!['up', 'down', 'e2e'].includes(action)) continue;
+      const gi = rest.indexOf('--grep');
+      const grep = gi >= 0 ? rest[gi + 1] : rest.find((t) => t.startsWith('--grep='))?.slice(7);
+      const scoped = action === 'e2e' && rest.includes('--scratch') && grep && !grep.startsWith('-');
+      if (scoped && sub === 'test-fix') continue;
+      return `\`${seg.trim()}\` ${scoped ? 'is a scratch run outside test-fix' : action === 'e2e' && rest.includes('--scratch') ? 'is a scratch run without --grep' : 'is a stack operation'}`;
+    }
+  }
+  return null;
 }
 
 const raw = ti.file_path || ti.notebook_path;

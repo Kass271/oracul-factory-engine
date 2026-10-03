@@ -10,6 +10,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ENGINE } from '../checks/lib/core.mjs';
 import { analyseRed } from '../checks/lib/red.mjs';
+import { acquire } from '../checks/lib/lock.mjs';
+import { e2eEnv, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
 const SPEC = 'docs/phase-01_mvp/02_specs/rooms.md';
@@ -275,6 +277,8 @@ test('state: init → phase new → approve → slices → next-slice → impact
 
 test('state green: set subStep test-fix', 0, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'test-fix']),
   (sb) => JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/state.json'), 'utf8')).subStep === 'test-fix' || 'subStep not stored');
+test('state green: set subStep e2e', 0, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'e2e']),
+  (sb) => JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/state.json'), 'utf8')).subStep === 'e2e' || 'subStep not stored');
 test('state red: set unknown subStep', 1, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'test-fixing']));
 
 // ---------------- hooks: guard
@@ -294,6 +298,126 @@ test('guard red: TEST-FIX edits the contract', 2, (sb) => { sb.state({ subStep: 
 test('guard green: TEST-FIX repairs a test', 0, (sb) => { sb.state({ subStep: 'test-fix' }); return hook(sb, 'guard-edits', W(sb.p('backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java'))); });
 test('guard red: REVIEW edits code', 2, (sb) => { sb.state({ subStep: 'review' }); return hook(sb, 'guard-edits', W(sb.p('backend/src/main/java/X.java'))); });
 test('guard green: REVIEW writes findings', 0, (sb) => { sb.state({ subStep: 'review' }); return hook(sb, 'guard-edits', W(sb.doc('04_build/01_rooms/review-findings.json'))); });
+
+// ---------------- hooks: Playwright / Docker stack only in subStep e2e (+ tester scratch runs in test-fix)
+const STACK = path.join(ENGINE, 'bin/stack.mjs');
+const bash = (sb, sub, command) => { sb.state({ step: '04_build', slice: '01_rooms', subStep: sub }); return hook(sb, 'guard-edits', { tool_name: 'Bash', tool_input: { command } }); };
+for (const [sub, cmd] of [
+  ['green', 'npx playwright test'],
+  ['green', 'cd apps/fixture/e2e && npx playwright test --grep x'],
+  ['green', 'CI=true npx --yes playwright test rooms.spec.ts'],
+  ['green', 'cd apps/fixture/e2e && npm test'],
+  ['green', 'npm --prefix apps/fixture/e2e run test'],
+  ['test-fix', `node ${STACK} e2e`],
+  ['test-fix', `node ${STACK} e2e --scratch`],
+  ['green', `node ${STACK} e2e --scratch --grep x`],
+  ['red', `node "${STACK}" up`],
+  ['review', 'docker compose up -d'],
+  ['green', `node ${STACK} down`],
+  ['green', 'docker stop fixture-backend-1'],
+]) test(`guard red: ${sub} runs \`${cmd.replace(ENGINE, '<engine>')}\``, 2, (sb) => bash(sb, sub, cmd));
+for (const [sub, cmd] of [
+  ['test-fix', `node ${STACK} e2e --scratch --grep rooms.spec.ts`],
+  ['e2e', `node ${STACK} e2e`],
+  ['none', `node ${STACK} up && node ${STACK} down`],
+  ['green', `node ${STACK} status`],
+  ['green', 'cat apps/fixture/e2e/playwright.config.ts'],
+  ['green', 'grep -r playwright apps/fixture/e2e'],
+  ['green', 'docker compose logs backend'],
+  ['green', 'docker ps'],
+  ['green', 'cd apps/fixture/frontend && npm run test:ci'],
+  ['green', 'cd apps/fixture/backend && ./gradlew test'],
+  ['green', 'cd apps/fixture/e2e && npm install @playwright/test'],
+]) test(`guard green: ${sub} runs \`${cmd.replace(ENGINE, '<engine>').replace(ENGINE, '<engine>')}\``, 0, (sb) => bash(sb, sub, cmd));
+
+// ---------------- stack lock + scratch runs (no Docker: --dry-run stops before compose/Playwright)
+const LOCK = (sb) => path.join(sb.stateDir, 'apps/fixture/stack.lock');
+const putLock = (sb, pid, startedAt = new Date().toISOString()) => write(LOCK(sb), JSON.stringify({ pid, cmd: 'e2e', startedAt }));
+const deadPid = () => spawnSync('node', ['-e', '']).pid;
+const TEMPLATE_PW = fs.readFileSync(path.join(ENGINE, 'templates/app/e2e/playwright.config.ts'), 'utf8');
+test('stack red: live lock → STACK BUSY exit 3', 3, (sb) => { putLock(sb, process.pid); return node(sb, 'bin/stack.mjs', ['up', '--lock-wait', '0', '--dry-run']); },
+  (sb, r) => (/STACK BUSY: e2e by pid/.test(r.out) && fs.existsSync(LOCK(sb))) || 'busy message missing or live lock deleted');
+test('stack green: stale lock taken over, released after', 0, (sb) => { putLock(sb, deadPid()); return node(sb, 'bin/stack.mjs', ['e2e', '--dry-run']); },
+  (sb, r) => (/stale stack lock/.test(r.out) && /DRY RUN/.test(r.out) && !fs.existsSync(LOCK(sb))) || r.out);
+test('stack red: scratch run without --grep', 1, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--scratch', '--dry-run']); });
+test('stack red: scratch run on a config without E2E_REPORT_DIR/E2E_OUTPUT_DIR', 1, (sb) => node(sb, 'bin/stack.mjs', ['e2e', '--scratch', '--grep', 'rooms.spec.ts', '--dry-run']),
+  (sb, r) => (/E2E_REPORT_DIR\/E2E_OUTPUT_DIR support/.test(r.out) && !/DRY RUN/.test(r.out) && !fs.existsSync(LOCK(sb))) || r.out);
+test('stack green: scratch run on the template config', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--scratch', '--grep', 'rooms.spec.ts', '--dry-run']); },
+  (sb, r) => (/playwright test rooms\.spec\.ts/.test(r.out) && /E2E_REPORT_DIR=report-scratch/.test(r.out) && /E2E_OUTPUT_DIR=test-results-scratch/.test(r.out)) || r.out);
+test('scratch env green: never points at official output', 0, (sb) => {
+  const p = scratchEnvProblems(e2eEnv({ appDir: sb.appDir, phaseDir: sb.doc(''), scratch: true }), sb.appDir);
+  return { code: p.length ? 1 : 0, out: p.join('\n') };
+});
+test('scratch env red: env writing e2e/report is rejected', 1, (sb) => {
+  const p = scratchEnvProblems({ ...e2eEnv({ appDir: sb.appDir, phaseDir: sb.doc(''), scratch: true }), E2E_REPORT_DIR: 'report' }, sb.appDir);
+  return { code: p.length ? 1 : 0, out: p.join('\n') };
+});
+test('scratch env red: official env used as scratch is rejected', 1, (sb) => {
+  const p = scratchEnvProblems(e2eEnv({ appDir: sb.appDir, phaseDir: sb.doc(''), scratch: false }), sb.appDir);
+  return { code: p.length ? 1 : 0, out: p.join('\n') };
+});
+test('template green: playwright config supports scratch, defaults unchanged', 0, () => {
+  const ok = scratchSupported(TEMPLATE_PW) && /E2E_REPORT_DIR \?\? 'report'/.test(TEMPLATE_PW) && /E2E_OUTPUT_DIR \?\? 'test-results'/.test(TEMPLATE_PW)
+    && /\$\{reportDir\}\/results\.json/.test(TEMPLATE_PW);
+  return { code: ok ? 0 : 1, out: TEMPLATE_PW };
+});
+test('template red: config without env support is rejected', 1, (sb) => ({ code: scratchSupported(sb.read('e2e/playwright.config.ts')) ? 0 : 1, out: '' }));
+const FAILED_REPORT = { suites: [{ title: 'rooms.spec.ts', file: 'rooms.spec.ts', specs: [{ title: 'FR-1 create room', file: 'rooms.spec.ts', tests: [{ status: 'unexpected', projectName: 'chromium',
+  results: [{ status: 'failed', error: { message: '\u001b[31mError: expect(locator).toBeVisible() failed\u001b[39m\nLocator: getByTestId(\'room-row\')' },
+    attachments: [{ name: 'trace', contentType: 'application/zip', path: '/app/e2e/test-results/rooms-FR-1/trace.zip' }] }] }] }], suites: [] }] };
+test('failure block green: names file, title, error and trace', 0, () => {
+  const b = failureBlock(FAILED_REPORT, '/app');
+  const ok = /==== E2E FAILURES \(1\)/.test(b) && /rooms\.spec\.ts › FR-1 create room/.test(b) && /toBeVisible\(\) failed/.test(b) && !/\u001b/.test(b)
+    && /attachment: e2e\/test-results\/rooms-FR-1\/trace\.zip/.test(b) && /END E2E FAILURES/.test(b);
+  return { code: ok ? 0 : 1, out: b };
+});
+test('failure block red: passing report has no block', 1, (sb) => {
+  const b = failureBlock(JSON.parse(sb.read('e2e/report/results.json')), sb.appDir);
+  return { code: b ? 0 : 1, out: b };
+});
+test('failure block green: 12 failures fit the 80-line runner window', 0, () => {
+  const many = { suites: [{ file: 'a.spec.ts', specs: Array.from({ length: 12 }, (_, i) => ({ title: `t${i}`, file: 'a.spec.ts', tests: [{ status: 'unexpected', results: [{ error: { message: Array.from({ length: 30 }, (_, j) => `line ${j}`).join('\n') } }] }] })) }] };
+  const lines = failureBlock(many, '/app').split('\n');
+  return { code: lines.length <= 70 && lines.some((l) => /2 more failure/.test(l)) ? 0 : 1, out: `${lines.length} lines` };
+});
+
+// lock library (async)
+const asyncTests = [];
+const atest = (name, expectCode, fn) => { if (!filter || name.includes(filter)) asyncTests.push({ name, expectCode, fn }); };
+const lockFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'oracul-lock-')), 'stack.lock');
+const quiet = () => {};
+atest('lock red: live fresh lock, no wait → busy', 3, async () => {
+  const f = lockFile(); write(f, JSON.stringify({ pid: process.pid, cmd: 'e2e', startedAt: new Date().toISOString() }));
+  const l = await acquire(f, 'up', { waitS: 0, log: quiet });
+  return { code: l.ok ? 0 : 3, out: fs.existsSync(f) ? '' : 'live lock was deleted' };
+});
+atest('lock green: dead pid → taken over', 0, async () => {
+  const f = lockFile(); write(f, JSON.stringify({ pid: deadPid(), cmd: 'e2e', startedAt: new Date().toISOString() }));
+  const l = await acquire(f, 'up', { waitS: 0, log: quiet });
+  const mine = JSON.parse(fs.readFileSync(f, 'utf8')).pid === process.pid;
+  l.release?.();
+  return { code: l.ok && mine && !fs.existsSync(f) ? 0 : 1, out: '' };
+});
+atest('lock green: live pid but 2 h old → taken over', 0, async () => {
+  const f = lockFile(); write(f, JSON.stringify({ pid: process.pid, cmd: 'e2e', startedAt: new Date(Date.now() - 2 * 3600_000).toISOString() }));
+  const l = await acquire(f, 'up', { waitS: 0, log: quiet });
+  l.release?.();
+  return { code: l.ok && !fs.existsSync(f) ? 0 : 1, out: '' };
+});
+atest('lock green: no lock → acquired, gone after release', 0, async () => {
+  const f = lockFile();
+  const l = await acquire(f, 'up', { waitS: 0, log: quiet });
+  const held = fs.existsSync(f) && JSON.parse(fs.readFileSync(f, 'utf8')).cmd === 'up';
+  l.release();
+  return { code: l.ok && held && !fs.existsSync(f) ? 0 : 1, out: '' };
+});
+atest('lock red: lock released by its holder is free again; a second holder waits', 3, async () => {
+  const f = lockFile();
+  const a = await acquire(f, 'e2e', { waitS: 0, log: quiet });
+  const b = await acquire(f, 'up', { waitS: 0, log: quiet });
+  a.release();
+  return { code: a.ok && !b.ok ? 3 : 0, out: '' };
+});
 
 // ---------------- hooks: stop / subagent-stop / session-start
 test('stop red: build step with RED verify blocks once', 2, (sb) => { sb.state({ step: '04_build', lastVerify: { at: new Date().toISOString(), result: 'RED', failing: ['check-coverage'] } }); return hook(sb, 'stop', { stop_hook_active: false }); });
@@ -436,10 +560,54 @@ wf('workflow green: test finding goes to tester, code finding to builders', 0, w
   const testFix = calls.findIndex((c) => /set subStep test-fix/.test(c.prompt));
   return result.status === 'DONE' && tester && /rooms\.spec\.ts/.test(tester.prompt) && !/rooms\.spec\.ts/.test(be.prompt) && /npe/.test(be.prompt) && !/npe/.test(tester.prompt) && testFix >= 0 ? 0 : 1;
 });
+const e2eCalls = (calls) => calls.filter((c) => /stack\.mjs" e2e/.test(c.prompt));
+wf('workflow green: every official e2e run sets subStep e2e right before it', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
+  const runs = e2eCalls(calls);
+  return runs.length && runs.every((c) => { const i = c.prompt.indexOf('set subStep e2e'); return i >= 0 && i < c.prompt.indexOf('stack.mjs" e2e'); }) ? 0 : 1;
+});
+const busyThen = (busyTimes) => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) ? (n++ < busyTimes ? { exitCode: 3, output: 'STACK BUSY: e2e by pid 42 since x' } : { exitCode: 0, output: 'E2E PASS' }) : ok0(p, o)); };
+const between = (calls, from, to) => calls.slice(from + 1, to);
+wf('workflow green: stack busy once → rerun, no fix round, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(1), ({ result, calls }) => {
+  const idx = calls.map((c, i) => (/stack\.mjs" e2e/.test(c.prompt) ? i : -1)).filter((i) => i >= 0);
+  const mid = between(calls, idx[0], idx[1]);
+  return result.status === 'DONE' && idx.length === 2 && !mid.some((c) => /^(triage|tester|backend|frontend)/.test(c.opts.label || '')) ? 0 : 1;
+});
+wf('workflow red: stack busy twice → BLOCKED "e2e: stack busy", never triaged', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(2), ({ result, calls }) =>
+  (result.status === 'BLOCKED' && result.failing.includes('e2e: stack busy') && !calls.some((c) => /^triage/.test(c.opts.label || '')) ? 1 : 0));
+const BLOCK = '==== E2E FAILURES (1) ====\n✘ rooms.spec.ts › FR-1 create room\n    Error: not visible\n==== END E2E FAILURES ===='
+wf('workflow green: E2E FAILURES block reaches the next fix round; builders told not to run E2E', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
+  let n = 0;
+  return (p, o) => (/stack\.mjs" e2e/.test(p) ? (n++ ? { exitCode: 0, output: 'E2E PASS' } : { exitCode: 1, output: `E2E FAIL\n${BLOCK}` }) : ok0(p, o));
+})(), ({ result, calls }) => {
+  const be2 = calls.find((c) => c.opts.label === 'backend: 01_rooms r2');
+  const be1 = calls.find((c) => c.opts.label === 'backend: 01_rooms r1');
+  const tri = calls.findIndex((c) => /^triage: E2E/.test(c.opts.label || ''));
+  const greenBeforeTriage = /set subStep green/.test(calls[tri - 1]?.prompt || '');
+  return result.status === 'DONE' && be2 && be2.prompt.includes(BLOCK) && !be1.prompt.includes('E2E FAILURES ====')
+    && /Do not run Playwright/.test(be1.prompt) && greenBeforeTriage ? 0 : 1;
+});
 for (const c of asyncCases) {
   let got, note = '';
   try { got = c.judge(await runWorkflow('build-slice.js', c.args, c.answer)); } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name: c.name, ok: got === c.expectCode, expectCode: c.expectCode, got, note, out: '' });
+}
+
+const relArgs = { engine: ENGINE, root: '/r', app: 'a', appDir: '/r/apps/a', phase: 'phase-01_mvp', phaseDir: '/r/apps/a/docs/phase-01_mvp' };
+for (const [name, expectCode, busyTimes] of [['workflow red: release stack busy twice → RED "e2e: stack busy", never triaged', 1, 2], ['workflow green: release stack busy once → rerun, GREEN', 0, 1]]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try {
+    const { result, calls } = await runWorkflow('finish-and-run.js', relArgs, busyThen(busyTimes));
+    const triaged = calls.some((c) => /^triage/.test(c.opts.label || ''));
+    got = result.status === 'RED' && result.problems.includes('e2e: stack busy') && !triaged ? 1 : result.status === 'GREEN' && !triaged ? 0 : 'other';
+    if (got === 'other') note = JSON.stringify(result).slice(0, 300);
+  } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
+}
+for (const t of asyncTests) {
+  let res, note = '';
+  try { res = await t.fn(); } catch (e) { res = { code: 'ERR', out: '' }; note = String(e); }
+  results.push({ name: t.name, ok: res.code === t.expectCode, expectCode: t.expectCode, got: res.code, note: note || res.out, out: res.out });
 }
 
 // ---------------- report

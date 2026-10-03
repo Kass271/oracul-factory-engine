@@ -41,6 +41,12 @@ In a fix round you get a list of tests that are broken (compile error, flaky tim
 spec — found by verify/E2E triage or by the reviewer. Fix exactly those. The spec and contract are the authority:
 a test that matches the spec stays; the code is then wrong and goes to the builders. Run the affected tests.
 
+E2E: never run Playwright, `docker compose` or `stack.mjs up|down|e2e` yourself — a hook blocks it; the workflow's E2E
+step is the gate. For an E2E test in your list, read the `E2E FAILURES` block (failed test, error lines, trace path)
+first. In a fix round you may then verify your repair once or twice with
+`node <engine>/bin/stack.mjs e2e --scratch --grep <spec file>` (Bash, foreground, timeout 600000; it waits for the
+stack lock and rebuilds the stack, so it takes minutes). Scratch results are not evidence.
+
 Finish with a short list: test file → FRs → why it fails now (or, in a fix round, what you changed and why); name every
 earlier test you updated and the spec line that made it outdated; name the exhaustive tests and the range each covers;
 end with the last `RESULT:` line of your own red-check run.

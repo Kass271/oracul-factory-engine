@@ -76,6 +76,9 @@ test('FR-3 user creates a room', async ({ page }) => {
 ```
 Every FR with `UI: yes` has one E2E test with `evidence(...)`. E2E is not part of the RED check (`red-check` runs unit and
 integration tests only), but every slice runs `stack.mjs e2e` after verify is GREEN and before review, and Step 5 runs it again.
+The official E2E run happens only in subStep `e2e` (hook-enforced, serialised by the stack lock). In a test-fix round the
+tester may verify an E2E repair with `stack.mjs e2e --scratch --grep <spec file>`; it writes `e2e/report-scratch/` and
+`e2e/test-results-scratch/` and is never evidence.
 
 ## When a later spec changes behaviour
 A spec line `Changes earlier behaviour: <old> → <new> (tests: <files>)` makes those tests outdated. The tester updates

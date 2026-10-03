@@ -20,5 +20,6 @@ Hooks block you from editing tests, `api/openapi.yaml` and generated code. If a 
 5. Schema changes only through new Flyway migrations; `ddl-auto=validate` must keep passing.
 6. Loop: `cd backend && ./gradlew test` until all backend tests pass. If you are given review findings or check output, fix exactly those.
 7. Tests belong to the tester. If a test looks wrong (contradicts the spec, broken, flaky), report it as a test problem (file + reason) — the workflow sends it to the tester. Never bend the code around a wrong test.
+8. Never run Playwright, `docker compose` or `stack.mjs up|down|e2e` — the workflow's E2E step runs them (a hook blocks it). Unit/integration tests are fine. For E2E failures read the `E2E FAILURES` block you were given (failed test, error, trace path).
 
 Finish with: files changed, test result line, test problems (file + reason) and anything you think is wrong in the contract.

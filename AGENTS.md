@@ -18,10 +18,12 @@ skills/       factory (orchestrator) · clarify · stack-rules · testing-rules 
 agents/       analyst · tester · backend-builder · frontend-builder · reviewer · qa-documenter
 workflows/    build-slice.js (Step 4, stage red | green — red-check runs between them as a direct orchestrator command)
               finish-and-run.js (Step 5) — called by scriptPath, no fs access inside
-hooks/        hooks.json + session-start · guard-edits · post-edit · subagent-stop · stop
+hooks/        hooks.json + session-start · guard-edits (also: Playwright/stack only in subStep e2e) · post-edit · subagent-stop · stop
 checks/       verify + check-traceability · check-coverage · check-contract · check-review · check-artifacts
-              gen-traceability · manifest/artifacts.manifest.json · lib/ (core, docs parsers, red analysis)
-bin/          state.mjs (only state writer) · env-check · scaffold · red-check · stack · commit
+              gen-traceability · manifest/artifacts.manifest.json
+              lib/ (core, docs parsers, red analysis, lock = stack lock, e2e = scratch env + failure block)
+bin/          state.mjs (only state writer) · env-check · scaffold · red-check · commit
+              stack (Docker + E2E; up/down/e2e hold the stack lock; e2e --scratch = tester's scoped run)
 templates/    app/ (skeleton overlay) · docs/ (one template per step document)
 self-test/    run.mjs + fixtures/app-green (red cases are mutations of the green fixture)
 state/        runtime state of generated apps (gitignored)

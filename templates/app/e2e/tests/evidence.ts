@@ -4,7 +4,8 @@ import type { Page } from '@playwright/test';
 
 /**
  * Saves QA evidence for a requirement as docs/<phase>/05_release/qa/screenshots/<FR-x>-<name>.png.
- * The directory comes from QA_SCREENSHOTS_DIR, set by factory-engine/bin/e2e.mjs.
+ * The directory comes from QA_SCREENSHOTS_DIR, set by `factory-engine/bin/stack.mjs e2e` (scratch runs point it
+ * at e2e/report-scratch/screenshots, so they never write QA evidence). Unset → no screenshot.
  */
 export async function evidence(page: Page, fr: string, name: string): Promise<void> {
   const dir = process.env.QA_SCREENSHOTS_DIR;

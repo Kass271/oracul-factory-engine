@@ -80,6 +80,19 @@ async function role(name, prompt, label, schema) {
 }
 
 const note = (title, body) => sh(`mkdir -p "${sliceDir}" && cat >> "${sliceDir}/rounds.md" <<'ORACUL_EOF'\n\n## ${title}\n${body}\nORACUL_EOF`, `note ${title}`)
+// Official E2E: subStep e2e (the only subStep the hook lets run Playwright) + the locked stack run, in one command.
+// Exit 3 / "STACK BUSY" = another stack operation holds the lock — infrastructure, not code: rerun once, never triage.
+const isBusy = (r) => r.exitCode === 3 || /STACK BUSY/.test(r.output || '')
+async function e2eRun(label) {
+  const cmd = `${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'e2e')}`
+  let r = await sh(cmd, label)
+  if (isBusy(r)) { log('stack busy — rerunning E2E once'); r = await sh(cmd, `${label} (stack busy, retry)`) }
+  return { ...r, busy: isBusy(r) }
+}
+const failureBlock = (out) => (String(out || '').match(/==== E2E FAILURES[\s\S]*?==== END E2E FAILURES ====/) || [''])[0]
+const NO_E2E = 'Do not run Playwright, docker compose or stack.mjs up/down/e2e — the workflow\'s E2E step runs them (hook-enforced). Unit/integration tests (./gradlew test, npm run test:ci) are fine. For E2E failures read the E2E FAILURES block you were given.'
+const TESTER_E2E = `For an E2E test in the list, read the E2E FAILURES block and its trace first. You may verify your repair once or twice with ${node('bin/stack.mjs', 'e2e --scratch --grep <spec file>')} (Bash, foreground, timeout 600000; it waits for the lock and takes minutes). Never run Playwright directly. Scratch results are not evidence — the workflow's E2E step decides.`
+
 const isTest = (f) => /(^|\/)(backend\/src\/test\/|e2e\/tests\/)|\.spec\.ts$/.test(f || '')
 const list = (ps) => ps.map((p) => `- ${p.file}: ${p.problem}`).join('\n')
 
@@ -116,19 +129,20 @@ if (status === 'BLOCKED') await note('Red phase failed', `red-check could not co
 phase('Green')
 // work.code → builders · work.tests → tester (never the other way round)
 let work = { code: 'Implement the slice until all its RED tests (unit, integration and E2E) pass.', tests: [] }
+let e2eFailures = '' // E2E FAILURES block of the last official run, forwarded unchanged to the next fix round
 while (status === 'GREEN-PENDING' && rounds < MAX) {
   rounds++
   await sh(node('bin/state.mjs', 'round +1'), `round ${rounds}`)
 
   if (work.tests.length) {
     await sh(node('bin/state.mjs', 'set subStep test-fix'), `state → test-fix r${rounds}`)
-    await role('tester', `${CTX}\n\nFix round ${rounds} — repair these tests of slice ${S} (production code is locked for you):\n${list(work.tests)}\n\nThe spec and contract are the authority: make each test assert exactly what they say. Never weaken an assertion just to make it pass, never delete a test of an FR that is still valid, keep every @trace tag. Run the affected tests before finishing.`, `tester: fix ${S} r${rounds}`)
+    await role('tester', `${CTX}\n\nFix round ${rounds} — repair these tests of slice ${S} (production code is locked for you):\n${list(work.tests)}\n\nThe spec and contract are the authority: make each test assert exactly what they say. Never weaken an assertion just to make it pass, never delete a test of an FR that is still valid, keep every @trace tag. Run the affected tests before finishing. ${TESTER_E2E}${e2eFailures ? `\n\n${e2eFailures}` : ''}`, `tester: fix ${S} r${rounds}`)
   }
   let hints = []
   if (work.code) {
     await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
     const task = rounds === 1 ? work.code : `Fix round ${rounds}. Fix exactly these problems:\n${work.code}`
-    const tail = '\n\nTests are locked for you. If you believe a test is wrong (contradicts the spec, broken, flaky), do not work around it — report it in testProblems; the tester fixes tests.'
+    const tail = `\n\nTests are locked for you. If you believe a test is wrong (contradicts the spec, broken, flaky), do not work around it — report it in testProblems; the tester fixes tests. ${NO_E2E}${e2eFailures ? `\n\n${e2eFailures}` : ''}`
     const rs = await parallel([
       () => role('backend-builder', `${CTX}\n\nStep 4c — backend for ${S}. ${task}${tail}`, `backend: ${S} r${rounds}`, BUILDER_SCHEMA),
       () => role('frontend-builder', `${CTX}\n\nStep 4c — frontend for ${S}. ${task}${tail}`, `frontend: ${S} r${rounds}`, BUILDER_SCHEMA),
@@ -136,6 +150,7 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
     hints = rs.filter(Boolean).flatMap((r) => r.testProblems || [])
   }
   await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
+  e2eFailures = ''
 
   const v = await sh(node('checks/verify.mjs'), `verify r${rounds}`)
   if (v.exitCode !== 0) {
@@ -146,10 +161,18 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
     continue
   }
 
-  const e = await sh(node('bin/stack.mjs', 'e2e'), `docker up + e2e r${rounds}`)
+  const e = await e2eRun(`docker up + e2e r${rounds}`)
+  if (e.busy) {
+    failing = ['e2e: stack busy']
+    feedback = `Another stack operation held the lock twice in a row (not a code failure):\n${e.output}`
+    await note(`Round ${rounds}`, `- Trigger: E2E could not run — stack busy (lock held by another operation), not triaged\n- Output:\n\n\`\`\`\n${e.output.slice(-1500)}\n\`\`\``)
+    break
+  }
   if (e.exitCode !== 0) {
     failing = ['e2e']
     feedback = `Playwright E2E against the Docker stack failed:\n${e.output}`
+    e2eFailures = failureBlock(e.output)
+    await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds} (after e2e)`)
     work = await triage('E2E (Playwright against the Docker stack, rebuilt with docker compose up --build)', e.output, hints, rounds)
     await note(`Round ${rounds}`, `- Trigger: E2E RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${e.output.slice(-3000)}\n\`\`\``)
     continue

@@ -32,7 +32,7 @@ Below, `$E` = engine path, `$APP` = appDir, `$PD` = phaseDir. Agents: subagent t
   - next phase → `node $E/bin/state.mjs phase new <short-name>`, then Step 0 (phase 02+ variant).
   - new app → Step 0 with a new name.
 - **"continue"** → resume at the current `step`/`subStep`. Slice IN_PROGRESS: subStep `spec` → from stage `red`;
-  `red` → from red-check (Step 4.2); `test-fix`/`green`/`review` → stage `green` with `red: { exitCode: 0, output: "resumed" }`
+  `red` → from red-check (Step 4.2); `test-fix`/`green`/`e2e`/`review` → stage `green` with `red: { exitCode: 0, output: "resumed" }`
   (the earlier red-evidence.md is still checked at close).
 
 ## Step 0 — setup
@@ -99,7 +99,10 @@ Loop:
 3. Result `DONE` → one-line progress message to the user, continue.
    Result `BLOCKED` with `decision: "CONTINUE"` → tell the user (slice, FRs not delivered, failure note path), continue.
    Result `BLOCKED` with `decision: "STOP"` → stop the phase; report the failure note and the dependent slices; ask the user how to proceed.
-4. Slices whose dependency is BLOCKED are skipped (they appear in `skippedBecauseBlocked`); mention them in the final report.
+4. A slice BLOCKED with `failing: ["e2e: stack busy"]` was not a code failure: another stack operation held the lock
+   (`stack.mjs` exit 3). Tell the user; never delete `state/apps/<app>/stack.lock` yourself — wait until the other
+   operation ends, then rerun the slice.
+5. Slices whose dependency is BLOCKED are skipped (they appear in `skippedBecauseBlocked`); mention them in the final report.
 
 ## Step 5 — release
 Workflow `scriptPath: <workflows.finishAndRun>`, `args: { engine, root, app, appDir, phase, phaseDir }`.
