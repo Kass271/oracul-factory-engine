@@ -364,6 +364,10 @@ test('template green: playwright config supports scratch, defaults unchanged', 0
     && /\$\{reportDir\}\/results\.json/.test(TEMPLATE_PW);
   return { code: ok ? 0 : 1, out: TEMPLATE_PW };
 });
+const JUNIT_PROPS = path.join(ENGINE, 'templates/app/backend/src/test/resources/junit-platform.properties');
+const hasTestTimeout = (text) => /^\s*junit\.jupiter\.execution\.timeout\.default\s*=\s*\d+\s*s\s*$/m.test(text || '');
+test('template green: backend tests have a default per-test timeout', 0, () => ({ code: fs.existsSync(JUNIT_PROPS) && hasTestTimeout(fs.readFileSync(JUNIT_PROPS, 'utf8')) ? 0 : 1, out: '' }));
+test('template red: properties without the timeout line are reported', 1, () => ({ code: hasTestTimeout('junit.jupiter.execution.parallel.enabled = true\n# junit.jupiter.execution.timeout.default = 120 s\n') ? 0 : 1, out: '' }));
 test('template red: config without env support is rejected', 1, (sb) => ({ code: scratchSupported(sb.read('e2e/playwright.config.ts')) ? 0 : 1, out: '' }));
 const FAILED_REPORT = { suites: [{ title: 'rooms.spec.ts', file: 'rooms.spec.ts', specs: [{ title: 'FR-1 create room', file: 'rooms.spec.ts', tests: [{ status: 'unexpected', projectName: 'chromium',
   results: [{ status: 'failed', error: { message: '\u001b[31mError: expect(locator).toBeVisible() failed\u001b[39m\nLocator: getByTestId(\'room-row\')' },

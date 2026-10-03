@@ -42,6 +42,9 @@ class RoomsApiIT {
 }
 ```
 Isolate data per test (unique names, or `@Sql`/repository cleanup in `@BeforeEach`). Never depend on test order.
+New apps carry `src/test/resources/junit-platform.properties` with `junit.jupiter.execution.timeout.default = 120 s`:
+a hanging backend test fails after 120 s with its name. Keep every test method and every parameterized invocation
+well below that (an exhaustive range is many fast invocations, not one long loop).
 
 ## Frontend (Angular unit tests, Vitest runner)
 ```ts
