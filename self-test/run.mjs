@@ -315,6 +315,8 @@ for (const [sub, cmd] of [
   ['review', 'docker compose up -d'],
   ['green', `node ${STACK} down`],
   ['green', 'docker stop fixture-backend-1'],
+  ['green', `node ${path.join(ENGINE, 'bin/state.mjs')} set subStep green && npx playwright test`],
+  ['e2e', `node ${path.join(ENGINE, 'bin/state.mjs')} set subStep review && node ${STACK} e2e`],
 ]) test(`guard red: ${sub} runs \`${cmd.replace(ENGINE, '<engine>')}\``, 2, (sb) => bash(sb, sub, cmd));
 for (const [sub, cmd] of [
   ['test-fix', `node ${STACK} e2e --scratch --grep rooms.spec.ts`],
@@ -328,6 +330,7 @@ for (const [sub, cmd] of [
   ['green', 'cd apps/fixture/frontend && npm run test:ci'],
   ['green', 'cd apps/fixture/backend && ./gradlew test'],
   ['green', 'cd apps/fixture/e2e && npm install @playwright/test'],
+  ['green', `node "${path.join(ENGINE, 'bin/state.mjs')}" set subStep e2e && node "${STACK}" e2e`],
 ]) test(`guard green: ${sub} runs \`${cmd.replace(ENGINE, '<engine>').replace(ENGINE, '<engine>')}\``, 0, (sb) => bash(sb, sub, cmd));
 
 // ---------------- stack lock + scratch runs (no Docker: --dry-run stops before compose/Playwright)
@@ -511,8 +514,8 @@ test('integrity: plugin, agents, skills, hooks, workflows parse', 0, () => {
 });
 
 // ---------------- workflows: build-slice stage contract (stub agents, no real commands)
-async function runWorkflow(file, args, answer) {
-  const src = fs.readFileSync(path.join(ENGINE, 'workflows', file), 'utf8').replace(/^export const meta/m, 'const meta');
+async function runWorkflow(file, args, answer, source) {
+  const src = (source ?? fs.readFileSync(path.join(ENGINE, 'workflows', file), 'utf8')).replace(/^export const meta/m, 'const meta');
   const AsyncFn = Object.getPrototypeOf(async () => {}).constructor;
   const calls = [];
   const agent = async (prompt, opts = {}) => { calls.push({ prompt, opts }); return answer(prompt, opts); };
@@ -608,6 +611,50 @@ for (const t of asyncTests) {
   let res, note = '';
   try { res = await t.fn(); } catch (e) { res = { code: 'ERR', out: '' }; note = String(e); }
   results.push({ name: t.name, ok: res.code === t.expectCode, expectCode: t.expectCode, got: res.code, note: note || res.out, out: res.out });
+}
+
+// Replay: every command a workflow runs must pass the real guard hook in the subStep the workflow itself set before it
+// (the hook runs BEFORE a command, so a chained `set subStep x && …` is judged segment by segment).
+async function replayThroughHook(file, args, answer, source) {
+  const sb = sandbox();
+  sb.state({ step: file === 'build-slice.js' ? '04_build' : '05_release', slice: '01_rooms', subStep: 'green' });
+  const blocked = [];
+  const { result } = await runWorkflow(file, { ...args, engine: ENGINE, root: sb.root, appDir: sb.appDir, phaseDir: sb.doc('') }, (p, o) => {
+    if (o.label?.startsWith('run:')) {
+      const cmd = (p.match(/```bash\n([\s\S]*?)\n```/) || [])[1] || '';
+      const h = hook(sb, 'guard-edits', { tool_name: 'Bash', tool_input: { command: cmd } });
+      if (h.code !== 0) blocked.push(`${o.label}: ${h.out.trim().slice(0, 160)}`);
+      for (const m of cmd.matchAll(/set subStep (\S+)/g)) sb.state({ subStep: m[1] });
+    }
+    return answer(p, o);
+  }, source);
+  fs.rmSync(sb.root, { recursive: true, force: true });
+  return { result, blocked };
+}
+const e2eFailsOnce = () => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) && !n++ ? { exitCode: 1, output: `E2E FAIL\n${BLOCK}` } : ok0(p, o)); };
+for (const [name, file, args] of [
+  ['replay green: build-slice green stage — every command passes the guard', 'build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } })],
+  ['replay green: build-slice red stage — every command passes the guard', 'build-slice.js', wfArgs({ stage: 'red' })],
+  ['replay green: finish-and-run — every command passes the guard', 'finish-and-run.js', relArgs],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try { const r = await replayThroughHook(file, args, e2eFailsOnce()); got = r.blocked.length ? 1 : 0; note = r.blocked.join(' | '); } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
+}
+{ // red counterpart: a workflow that runs E2E without switching to subStep e2e is caught by the replay
+  const name = 'replay red: E2E run while still in subStep green is caught';
+  if (!filter || name.includes(filter)) {
+    let got, note = '';
+    try {
+      const src = fs.readFileSync(path.join(ENGINE, 'workflows', 'build-slice.js'), 'utf8');
+      const mutated = src.replace("`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'e2e')}`", "node('bin/stack.mjs', 'e2e')");
+      if (mutated === src) throw new Error('mutation did not apply — update this case');
+      const r = await replayThroughHook('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, mutated);
+      got = r.blocked.length ? 1 : 0; note = r.blocked[0] || 'nothing blocked';
+    } catch (e) { got = 'ERR'; note = String(e); }
+    results.push({ name, ok: got === 1, expectCode: 1, got, note, out: '' });
+  }
 }
 
 // ---------------- report

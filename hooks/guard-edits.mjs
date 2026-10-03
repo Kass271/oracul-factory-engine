@@ -37,7 +37,7 @@ if (tool === 'Bash') {
     if (tok[0] === 'mv' && args.slice(0, -1).some(isEng)) deny();
   }
   const a = active();
-  if (a && ['red', 'green', 'test-fix', 'review'].includes(a.state.subStep)) {
+  if (a) {
     const why = stackViolation(c, cwd, a.state.subStep);
     if (why) block(`${why}: E2E and the Docker stack run only in the workflow's E2E step (subStep e2e). In a test-fix round the tester may verify a repair with: node <engine>/bin/stack.mjs e2e --scratch --grep <spec file>.`);
   }
@@ -45,8 +45,12 @@ if (tool === 'Bash') {
 }
 
 // First reason a command would run Playwright or change the Docker stack outside the lock, else null.
-function stackViolation(command, startDir, sub) {
+// Each segment is judged in the subStep it will run in: `state.mjs set subStep e2e && stack.mjs e2e` (the workflow's
+// own E2E step) is allowed, because the hook runs before the command and still sees the previous subStep.
+function stackViolation(command, startDir, startSub) {
+  const LOCKED_OUT = ['red', 'green', 'test-fix', 'review'];
   let dir = startDir;
+  let sub = startSub;
   for (const seg of command.split(/&&|\|\||[|;&\n]/)) {
     let tok = seg.trim().split(/\s+/).filter(Boolean).map((t) => t.replace(/^["']|["']$/g, ''));
     while (tok.length && (/^\w+=/.test(tok[0]) || tok[0] === 'env' || tok[0] === 'exec' || tok[0] === 'time')) tok = tok.slice(1);
@@ -54,6 +58,9 @@ function stackViolation(command, startDir, sub) {
     if (!tok.length) continue;
     const [c0, c1] = tok;
     if (c0 === 'cd') { dir = path.resolve(dir, tok[1] || '.'); continue; }
+    const si = tok.findIndex((t) => /(^|\/)state\.mjs$/.test(t));
+    if (si >= 0 && tok[si + 1] === 'set' && tok[si + 2] === 'subStep' && tok[si + 3]) { sub = tok[si + 3]; continue; }
+    if (!LOCKED_OUT.includes(sub)) continue;
     const runner = ['npx', 'pnpx', 'bunx', 'yarn', 'pnpm'].includes(c0);
     const pw = tok.findIndex((t) => /(^|\/)playwright$/.test(t));
     if (pw >= 0 && (pw === 0 || runner) && ['test', 'install'].includes(tok[pw + 1])) return `\`${seg.trim()}\` runs Playwright`;
