@@ -79,6 +79,9 @@ test('FR-3 user creates a room', async ({ page }) => {
 ```
 Every FR with `UI: yes` has one E2E test with `evidence(...)`. E2E is not part of the RED check (`red-check` runs unit and
 integration tests only), but every slice runs `stack.mjs e2e` after verify is GREEN and before review, and Step 5 runs it again.
+Round 1 runs the full suite; a fix round first runs only the slice's related specs plus last failures (a focus run, never
+evidence), then the full suite. A slice closes only when the last full run passed on exactly its final code
+(`check-e2e-fresh`).
 The official E2E run happens only in subStep `e2e` (hook-enforced, serialised by the stack lock). In a test-fix round the
 tester may verify an E2E repair with `stack.mjs e2e --scratch --grep <spec file>`; it writes `e2e/report-scratch/` and
 `e2e/test-results-scratch/` and is never evidence.

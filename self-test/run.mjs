@@ -12,7 +12,7 @@ import { ENGINE } from '../checks/lib/core.mjs';
 import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
 import { relatedTests } from '../checks/lib/related.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
-import { e2eEnv, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
+import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
@@ -611,6 +611,45 @@ test('stack red: detach while another stack operation holds the lock → exit 3'
 test('stack red: e2e-wait without a run → exit 1', 1, (sb) => node(sb, 'bin/stack.mjs', ['e2e-wait', '--max', '0']));
 test('stack red: --detach with --scratch is refused', 1, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--detach', '--scratch', '--grep', 'x']); });
 
+// ---------------- focus E2E + full-run record + freshness (A6)
+const E2ELAST = (sb) => path.join(sb.stateDir, 'apps/fixture/e2e-last.json');
+const officialRun = (sb, code = 0) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); fakePw(sb, 50, code); return node(sb, 'bin/stack.mjs', ['e2e', '--no-up']); };
+test('focus green: related E2E specs = slice-tagged + superseded + last failures, nothing unrelated', 0, (sb) => {
+  sb.put('e2e/tests/other.spec.ts', '// unrelated');
+  sb.put('e2e/tests/old-flow.spec.ts', '// superseded');
+  sb.put('e2e/tests/broke.spec.ts', '// failed last time');
+  sb.edit(SPEC, '- Changes earlier behaviour: none', '- Changes earlier behaviour: list → grid (tests: e2e/tests/old-flow.spec.ts)');
+  sb.put('e2e/report-focus/results.json', JSON.stringify({ suites: [{ file: 'broke.spec.ts', specs: [{ title: 't', file: 'broke.spec.ts', tests: [{ status: 'unexpected', results: [{ error: { message: 'x' } }] }] }] }] }));
+  const f = e2eFocus({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms' });
+  return { code: f.join(' ') === 'broke.spec.ts old-flow.spec.ts rooms.spec.ts' ? 0 : 1, out: f.join(' ') };
+});
+test('focus green: dry run scopes Playwright to the focus specs and uses the focus report dirs', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--focus-slice', '01_rooms', '--dry-run']); },
+  (sb, r) => (/FOCUS 01_rooms: rooms\.spec\.ts/.test(r.out) && /npx playwright test rooms\.spec\.ts/.test(r.out) && /E2E_REPORT_DIR=report-focus/.test(r.out) && /E2E_OUTPUT_DIR=test-results-focus/.test(r.out)) || r.out);
+test('focus red: an old config without separate report dirs → exit 5 FOCUS UNSUPPORTED (run the full E2E)', 5, (sb) => node(sb, 'bin/stack.mjs', ['e2e', '--focus-slice', '01_rooms', '--dry-run']),
+  (sb, r) => (/FOCUS UNSUPPORTED/.test(r.out) && /never run Playwright yourself/.test(r.out) && !fs.existsSync(LOCK(sb))) || r.out);
+test('focus red: nothing to focus on → exit 6 FOCUS EMPTY', 6, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--focus-slice', '02_search', '--dry-run']); });
+test('focus red: --scratch with --focus-slice is refused', 1, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--scratch', '--grep', 'x', '--focus-slice', '01_rooms', '--dry-run']); });
+test('focus env green: never points at official output', 0, (sb) => {
+  const p = scratchEnvProblems(e2eEnv({ appDir: sb.appDir, phaseDir: sb.doc(''), kind: 'focus' }), sb.appDir);
+  return { code: p.length ? 1 : 0, out: p.join('\n') };
+});
+test('e2e record green: an official full run records its hash; check-e2e-fresh passes on the same code', 0, (sb) => {
+  const r = officialRun(sb);
+  if (r.code) return r;
+  return node(sb, 'checks/check-e2e-fresh.mjs');
+}, (sb) => (JSON.parse(fs.readFileSync(E2ELAST(sb), 'utf8')).code === 0) || 'no record');
+test('e2e record green: a focus run writes no full-run record', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); fakePw(sb, 50, 0); return node(sb, 'bin/stack.mjs', ['e2e', '--no-up', '--focus-slice', '01_rooms']); },
+  (sb) => !fs.existsSync(E2ELAST(sb)) || 'focus run wrote e2e-last.json');
+test('e2e fresh red: production code changed after the full run', 1, (sb) => { officialRun(sb); sb.put('backend/src/main/java/com/oracul/app/New.java', 'class New {}'); return node(sb, 'checks/check-e2e-fresh.mjs'); });
+test('e2e fresh red: an E2E spec changed after the full run', 1, (sb) => { officialRun(sb); sb.put('e2e/tests/rooms.spec.ts', '// @trace FR-1\n// changed'); return node(sb, 'checks/check-e2e-fresh.mjs'); });
+test('e2e fresh green: docs or a backend test changed after the full run (not in the images)', 0, (sb) => {
+  officialRun(sb); sb.put('docs/phase-01_mvp/notes.md', 'x'); sb.put('backend/src/test/java/com/oracul/app/X.java', 'class X {}');
+  return node(sb, 'checks/check-e2e-fresh.mjs');
+});
+test('e2e fresh red: the last full run failed', 1, (sb) => { officialRun(sb, 1); return node(sb, 'checks/check-e2e-fresh.mjs'); });
+test('e2e fresh red: no full run recorded', 1, (sb) => node(sb, 'checks/check-e2e-fresh.mjs'));
+test('e2e fresh green: no record + --allow-missing (app built before the record) → WARN', 0, (sb) => node(sb, 'checks/check-e2e-fresh.mjs', ['--allow-missing']), (sb, r) => /WARN/.test(r.out) || r.out);
+
 // lock library (async)
 const asyncTests = [];
 const atest = (name, expectCode, fn) => { if (!filter || name.includes(filter)) asyncTests.push({ name, expectCode, fn }); };
@@ -764,7 +803,11 @@ async function runWorkflow(file, args, answer, source) {
   return { result: await fn(agent, parallel, null, () => {}, () => {}, args, null, null), calls };
 }
 const wfArgs = (extra) => ({ engine: ENGINE, root: '/r', app: 'a', appDir: '/r/apps/a', phase: 'phase-01_mvp', phaseDir: '/r/apps/a/docs/phase-01_mvp', slice: '01_rooms', frs: ['FR-1'], ...extra });
-const ok0 = (p, o) => (o.schema && o.schema.required?.includes('exitCode') ? { exitCode: 0, output: '{"slice":"01_rooms","decision":"CONTINUE","dependents":[]}' } : o.schema ? { summary: '', testProblems: [], open: [], code: '', tests: [] } : 'done');
+// The E2E freshness probe (without --allow-missing) answers "not fresh" by default, so the full E2E runs.
+const FRESH_PROBE = /check-e2e-fresh\.mjs"(?! --allow-missing)/;
+const ok0 = (p, o) => (o.schema && o.schema.required?.includes('exitCode')
+  ? (FRESH_PROBE.test(p) ? { exitCode: 1, output: 'INVALID  no full E2E run recorded' } : { exitCode: 0, output: '{"slice":"01_rooms","decision":"CONTINUE","dependents":[]}' })
+  : o.schema ? { summary: '', testProblems: [], open: [], code: '', tests: [] } : 'done');
 const asyncCases = [];
 let wfStarted = false; // wf() after the run loop would be silently skipped — it throws instead
 const wf = (name, expectCode, args, answer, judge) => {
@@ -812,6 +855,26 @@ wf('workflow red: related verify RED in a fix round → triaged, no full verify 
   return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' }
     : /verify\.mjs" --related/.test(p) ? { exitCode: 1, output: '==== VERIFY (related tests) RED: backend ====' } : ok0(p, o));
 })(), ({ calls }) => (verifyKinds(calls).join(',') === 'full,related' && calls.some((c) => /^triage: verify \(related tests\)/.test(c.opts.label || '')) ? 1 : 0));
+const e2eKinds = (calls) => calls.filter((c) => /stack\.mjs" e2e --detach/.test(c.prompt)).map((c) => (/--focus-slice 01_rooms/.test(c.prompt) ? 'focus' : 'full'));
+const e2eFailsFirst = (extra = () => null) => { let n = 0; return (p, o) => extra(p, o) || (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)); };
+wf('workflow green: round 1 = full E2E; a fix round = focus run, then the full run', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsFirst(),
+  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).join(',') === 'full,focus,full' ? 0 : 1));
+wf('workflow red: focus run RED → triaged, no full run in that round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }), (() => {
+  let n = 0;
+  return (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? (n++ < 2 ? { exitCode: 1, output: 'E2E FAIL' } : { exitCode: 0, output: 'E2E PASS' }) : ok0(p, o));
+})(), ({ calls }) => (e2eKinds(calls).join(',') === 'full,focus' && calls.some((c) => /^triage: E2E focus run/.test(c.opts.label || '')) ? 1 : 0));
+wf('workflow green: focus unsupported (exit 5) → straight to the full official run', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  e2eFailsFirst((p) => (/--focus-slice/.test(p) ? { exitCode: 5, output: 'FOCUS UNSUPPORTED: …' } : null)),
+  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).join(',') === 'full,focus,full' && !calls.some((c) => /^triage: E2E focus/.test(c.opts.label || '')) ? 0 : 1));
+wf('workflow green: the full run is skipped when check-e2e-fresh says the code was already tested', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (FRESH_PROBE.test(p) ? { exitCode: 0, output: 'PASS the last full E2E run passed on exactly this code' } : ok0(p, o)),
+  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).length === 0 ? 0 : 1));
+wf('workflow green: close checks the E2E freshness right after the verify reuse', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
+  const c = calls.find((x) => CLOSE.test(x.prompt));
+  const p = c ? runnerCommand(c.prompt) : '';
+  const a = p.indexOf('verify.mjs" --reuse-if-fresh'), b = p.indexOf('check-e2e-fresh.mjs" --allow-missing'), d = p.indexOf('check-artifacts.mjs');
+  return a >= 0 && b > a && d > b ? 0 : 1;
+});
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
   const stripped = tester.prompt.replace(/red-check/g, 'xxx');

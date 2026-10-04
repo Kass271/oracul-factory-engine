@@ -129,7 +129,9 @@ const note = (title, body) => {
 //   3. `stack.mjs e2e-wait --max 480`, repeated while it answers 75 (still running), up to E2E_WAITS times
 // "stack busy" on 1 or 2 is rerun once; anything else infrastructure-like ends up in infraReason().
 const E2E_WAITS = 8
-async function e2eRun(label) {
+// focus = a fix round's run of the slice's related specs + last failures (stack.mjs --focus-slice). Exit 5 (config
+// without separate report dirs) / 6 (nothing to focus on) → { focusSkipped }: the caller runs the full official E2E.
+async function e2eRun(label, focus = false) {
   const retryBusy = async (cmd, l) => {
     let r = await sh(cmd, l, { gate: true })
     if (infraReason(r) === 'stack busy') { log(`${l}: stack busy — rerunning once`); r = await sh(cmd, `${l} (stack busy, retry)`, { gate: true }) }
@@ -137,7 +139,8 @@ async function e2eRun(label) {
   }
   const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up')}`, `${label}: docker up`)
   if (up.exitCode !== 0) return up
-  const start = await retryBusy(node('bin/stack.mjs', 'e2e --detach'), `${label}: start Playwright`)
+  const start = await retryBusy(node('bin/stack.mjs', focus ? `e2e --detach --focus-slice ${S}` : 'e2e --detach'), `${label}: start Playwright`)
+  if (focus && (start.exitCode === 5 || start.exitCode === 6)) return { ...start, focusSkipped: true }
   if (start.exitCode !== 0) return start
   for (let i = 1; i <= E2E_WAITS; i++) {
     const w = await sh(node('bin/stack.mjs', 'e2e-wait --max 480'), `${label}: wait ${i}`, { gate: true })
@@ -243,7 +246,25 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
     continue
   }
 
-  const e = await e2eRun(`docker up + e2e r${rounds}`)
+  // E2E — a fix round first runs the related specs (focus run); the full official run is the slice gate. A full run
+  // that would test exactly the code of the last green full run (check-e2e-fresh) is skipped.
+  if (rounds > 1) {
+    const f = await e2eRun(`focus e2e r${rounds}`, true)
+    if (!f.focusSkipped) {
+      if (infraReason(f)) { stopped = { gate: 'e2e', reason: infraReason(f), output: f.output }; break }
+      if (f.exitCode !== 0) {
+        failing = ['e2e']
+        feedback = `Playwright E2E (focus run: related specs) failed:\n${f.output}`
+        e2eFailures = failureBlock(f.output)
+        await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds} (after focus e2e)`)
+        work = await triage('E2E focus run (related Playwright specs against the Docker stack)', f.output, hints, rounds)
+        await note(`Round ${rounds}`, `- Trigger: E2E focus run RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${f.output.slice(-3000)}\n\`\`\``)
+        continue
+      }
+    }
+  }
+  const fresh = await sh(node('checks/check-e2e-fresh.mjs'), `e2e fresh? r${rounds}`, { gate: true })
+  const e = fresh.exitCode === 0 ? { exitCode: 0, output: `full E2E skipped — ${fresh.output}` } : await e2eRun(`docker up + e2e r${rounds}`)
   if (infraReason(e)) { stopped = { gate: 'e2e', reason: infraReason(e), output: e.output }; break }
   if (e.exitCode !== 0) {
     failing = ['e2e']
@@ -289,6 +310,7 @@ phase('Close')
 if (status === 'DONE') {
   const close = await sh([
     node('checks/verify.mjs', '--reuse-if-fresh'),
+    node('checks/check-e2e-fresh.mjs', '--allow-missing'),
     node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage done`),
     node('checks/check-coverage.mjs', '--update'),
     node('bin/commit.mjs', `--message "${A.phase} ${S}: done (${FRS})"`),

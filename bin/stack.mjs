@@ -13,15 +13,23 @@
 //           a full suite outlives the 10-minute command limit of the workflow runner
 //   e2e-wait [--max <s>]  wait up to --max seconds (default 480) for the detached run: its output + exit code when
 //           done, exit 75 "E2E STILL RUNNING" otherwise (call again), exit 4 "E2E WORKER LOST" if the worker died
+//   e2e --focus-slice <s> [--detach]  focus run of a fix round (workflow): only the slice's related E2E specs + the
+//           specs that failed last time (checks/lib/e2e.mjs e2eFocus); writes e2e/report-focus + test-results-focus,
+//           never official evidence. Exit 5 FOCUS UNSUPPORTED (config without E2E_REPORT_DIR/E2E_OUTPUT_DIR — run the
+//           official full E2E instead), exit 6 FOCUS EMPTY (nothing to focus on — run the official full E2E).
+//   An official full run records { hash of the tested inputs, exit code } in state/apps/<app>/e2e-last.json
+//   (checks/check-e2e-fresh.mjs compares it with the current code).
 //   --lock-wait <s>  default 60 (120 for --scratch) · --dry-run  check preconditions + lock, print the plan, no Docker
 //   ORACUL_E2E_CMD='["cmd","arg"]'  replaces `npx playwright test` (self-test seam; never set it in a real run)
-// Exit: 0 ok · 1 failure · 3 stack busy (another stack operation holds the lock) · 4 worker lost · 75 still running
+// Exit: 0 ok · 1 failure · 3 stack busy (another stack operation holds the lock) · 4 worker lost · 5 focus unsupported
+//       · 6 focus empty · 75 still running
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { context, e2eRunPath, parseArgs, readJson, run, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
-import { SCRATCH, e2eEnv, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
+import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
+import { FOCUS, SCRATCH, e2eEnv, e2eFocus, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
+import { e2eInputsHash } from '../checks/lib/hash.mjs';
 import { acquire, alive } from '../checks/lib/lock.mjs';
 
 const args = parseArgs();
@@ -30,6 +38,8 @@ const cmd = args._[0];
 if (!ctx.appDir) { console.error('stack: no active app'); process.exit(1); }
 const URLS = { frontend: 'http://localhost:4200', backend: 'http://localhost:8080/actuator/health' };
 const scratch = !!args.scratch;
+const focusSlice = typeof args['focus-slice'] === 'string' ? args['focus-slice'] : null;
+const kind = scratch ? 'scratch' : focusSlice ? 'focus' : 'official';
 const lockWait = args['lock-wait'] !== undefined ? Number(args['lock-wait']) : scratch ? 120 : 60;
 const appName = ctx.app || path.basename(ctx.appDir);
 const RUN = { status: e2eRunPath(appName, 'json'), log: e2eRunPath(appName, 'log') };
@@ -91,7 +101,7 @@ function preconditions() {
 async function detach() {
   writeJson(RUN.status, { state: 'starting', startedAt: new Date().toISOString() });
   const fd = fs.openSync(RUN.log, 'w');
-  const pass = ['app', 'app-dir', 'phase', 'lock-wait'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, String(args[k])] : []));
+  const pass = ['app', 'app-dir', 'phase', 'lock-wait', 'focus-slice'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, String(args[k])] : []));
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'e2e', '--worker', '--no-up', ...pass], { detached: true, stdio: ['ignore', fd, fd], env: process.env });
   child.unref();
   fs.closeSync(fd);
@@ -134,13 +144,24 @@ switch (cmd) {
   case 'e2e': {
     const bad = preconditions();
     if (args.detach && scratch) bad.push('--detach is for the official run only (scratch runs are scoped and short)');
+    if (scratch && focusSlice) bad.push('--scratch and --focus-slice exclude each other');
     if (bad.length) { for (const b of bad) console.error(`stack e2e: ${b}`); process.exit(1); }
+    let focusFiles = [];
+    if (focusSlice) {
+      const cfg = fs.readFileSync(path.join(ctx.appDir, 'e2e', 'playwright.config.ts'), 'utf8');
+      if (!scratchSupported(cfg)) { console.log('FOCUS UNSUPPORTED: e2e/playwright.config.ts lacks E2E_REPORT_DIR/E2E_OUTPUT_DIR support — migration pending (migrate.mjs at the next slice boundary). Run the official full E2E instead; never run Playwright yourself.'); process.exit(5); }
+      const fp = scratchEnvProblems(e2eEnv({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, kind: 'focus' }), ctx.appDir);
+      if (fp.length) { console.error(`stack e2e: ${fp.join('; ')}`); process.exit(1); }
+      focusFiles = e2eFocus({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice: focusSlice });
+      if (!focusFiles.length) { console.log(`FOCUS EMPTY: no related or failed E2E spec for ${focusSlice} — run the official full E2E`); process.exit(6); }
+      console.log(`FOCUS ${focusSlice}: ${focusFiles.join(' ')}`);
+    }
     if (args.detach && !args['dry-run']) await detach();
     const worker = !!args.worker;
-    const l = await locked(scratch ? 'e2e --scratch' : 'e2e', () => worker && writeJson(RUN.status, { state: 'busy', pid: process.pid }));
+    const l = await locked(scratch ? 'e2e --scratch' : focusSlice ? 'e2e --focus' : 'e2e', () => worker && writeJson(RUN.status, { state: 'busy', pid: process.pid }));
     if (worker) writeJson(RUN.status, { state: 'running', pid: process.pid, startedAt: new Date().toISOString() });
-    const env = e2eEnv({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, scratch });
-    const pwArgs = ['playwright', 'test', ...(scratch ? filterArgs(args.grep) : [])];
+    const env = e2eEnv({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, kind });
+    const pwArgs = ['playwright', 'test', ...(scratch ? filterArgs(args.grep) : focusSlice ? focusFiles : [])];
     const override = process.env.ORACUL_E2E_CMD ? JSON.parse(process.env.ORACUL_E2E_CMD) : null;
     if (args['dry-run']) {
       console.log(`DRY RUN (lock held): ${args['no-up'] ? '' : 'docker compose up -d --build && '}npx ${pwArgs.join(' ')}`);
@@ -150,20 +171,25 @@ switch (cmd) {
     }
     if (!args['no-up']) await up();
     const e2eDir = path.join(ctx.appDir, 'e2e');
+    const tested = kind === 'official' ? e2eInputsHash(ctx.appDir) : null; // what this run tests (images are built)
     const tE = Date.now();
     const r = override
       ? run(override[0], override.slice(1), { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } })
       : run('npx', pwArgs, { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } });
-    const block = r.code ? failureBlock(readJson(path.join(e2eDir, scratch ? SCRATCH.report : 'report', 'results.json')), ctx.appDir) : '';
+    const reportDir = scratch ? SCRATCH.report : focusSlice ? FOCUS.report : 'report';
+    const block = r.code ? failureBlock(readJson(path.join(e2eDir, reportDir, 'results.json')), ctx.appDir) : '';
     console.log(tail(r.out, block ? 15 : 60));
     console.log(`Playwright took ${took(Date.now() - tE)}`);
-    console.log(`${scratch ? 'SCRATCH ' : ''}${r.code ? 'E2E FAIL' : 'E2E PASS'}${scratch ? ' (not evidence — the workflow E2E step decides)' : ''}`);
+    if (tested) writeJson(e2eLastPath(appName), { hash: tested, code: r.code ? 1 : 0, at: new Date().toISOString() });
+    const label = scratch ? 'SCRATCH ' : focusSlice ? 'FOCUS ' : '';
+    const note = scratch ? ' (not evidence — the workflow E2E step decides)' : focusSlice ? ' (related specs only — the full E2E run is the slice gate)' : '';
+    console.log(`${label}${r.code ? 'E2E FAIL' : 'E2E PASS'}${note}`);
     if (block) console.log(block);
     if (worker) writeJson(RUN.status, { state: 'done', code: r.code ? 1 : 0, pid: process.pid, finishedAt: new Date().toISOString() });
     l.release();
     process.exit(r.code ? 1 : 0);
   }
   default:
-    console.error('usage: stack.mjs up|down|status|e2e|e2e-wait [--no-up] [--detach] [--scratch --grep <pattern>] [--max <s>] [--lock-wait <s>] [--dry-run]');
+    console.error('usage: stack.mjs up|down|status|e2e|e2e-wait [--no-up] [--detach] [--scratch --grep <pattern>] [--focus-slice <s>] [--max <s>] [--lock-wait <s>] [--dry-run]');
     process.exit(1);
 }

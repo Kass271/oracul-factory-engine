@@ -2,14 +2,39 @@
 // Official runs write e2e/report, e2e/test-results and the QA screenshots; scratch runs (tester, test-fix only)
 // write next to them and never touch official evidence.
 import path from 'node:path';
+import { exists, readJson } from './core.mjs';
+import { collectTraces, parsePlan, parseSpecFrs } from './docs.mjs';
 
 export const SCRATCH = { report: 'report-scratch', output: 'test-results-scratch' };
+// Focus run (workflow, fix rounds): the slice's related E2E specs + last failures, before the full official run.
+export const FOCUS = { report: 'report-focus', output: 'test-results-focus' };
 
-export function e2eEnv({ appDir, phaseDir, scratch }) {
+// kind: 'official' | 'scratch' | 'focus' (scratch: true is the older spelling of kind 'scratch')
+export function e2eEnv({ appDir, phaseDir, scratch, kind }) {
   const e2e = path.join(appDir, 'e2e');
-  return scratch
-    ? { E2E_REPORT_DIR: SCRATCH.report, E2E_OUTPUT_DIR: SCRATCH.output, QA_SCREENSHOTS_DIR: path.join(e2e, SCRATCH.report, 'screenshots') }
+  const k = kind || (scratch ? 'scratch' : 'official');
+  const dirs = k === 'scratch' ? SCRATCH : k === 'focus' ? FOCUS : null;
+  return dirs
+    ? { E2E_REPORT_DIR: dirs.report, E2E_OUTPUT_DIR: dirs.output, QA_SCREENSHOTS_DIR: path.join(e2e, dirs.report, 'screenshots') }
     : { QA_SCREENSHOTS_DIR: path.join(phaseDir, '05_release', 'qa', 'screenshots') };
+}
+
+// The E2E spec files a focus run covers (paths relative to e2e/tests, as Playwright filters them):
+// specs tagged with the slice's FRs, e2e files the spec supersedes, and specs that failed in the last official or
+// focus run. [] = nothing to focus on.
+export function e2eFocus({ appDir, phaseDir, slice }) {
+  const s = (parsePlan(phaseDir) || []).find((p) => p.slice === slice);
+  if (!s) return [];
+  const traces = collectTraces(appDir);
+  const specs = parseSpecFrs(phaseDir);
+  const out = new Set();
+  const add = (rel) => { const m = rel.match(/^e2e\/tests\/(.+\.(?:spec|test)\.ts)$/); if (m && exists(path.join(appDir, rel))) out.add(m[1]); };
+  for (const f of s.frs) for (const t of traces.get(f) || []) if (t.layer === 'e2e') add(t.rel);
+  for (const f of s.frs) for (const c of specs.get(f)?.changes || []) for (const t of c.tests) add(t);
+  for (const dir of ['report', FOCUS.report]) {
+    for (const t of failedTests(readJson(path.join(appDir, 'e2e', dir, 'results.json')))) add(`e2e/tests/${t.file}`);
+  }
+  return [...out].sort();
 }
 
 // Problems if a scratch env could write official output. [] = safe.
