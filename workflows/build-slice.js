@@ -3,6 +3,7 @@ export const meta = {
   description: 'Oracul Step 4, one slice in two stages: stage "red" = spec delta → RED tests (the orchestrator then runs red-check itself); stage "green" = builders → verify → E2E → independent review, test problems to the tester, max 5 fix rounds, then DONE (commit) or BLOCKED (failure note)',
   phases: [
     { title: 'Spec', detail: 'analyst sharpens spec + contract for the slice' },
+    { title: 'Sync', detail: 'contract sync: production code compiles again after a contract change — marker stubs and declared renames only' },
     { title: 'Red', detail: 'tester writes failing tests and self-checks them with red-check (the gate run is outside, as a direct command)' },
     { title: 'Green', detail: 'builders (code) and tester (tests) fix, verify, E2E, independent review — up to 5 rounds' },
     { title: 'Close', detail: 'ratchet + artifacts + commit, or failure note + impact' },
@@ -169,12 +170,60 @@ async function triage(gate, output, hints, round) {
   return t
 }
 
+const SYNC_BRIEF = `Contract sync — make production code compile again after the contract change and add NO behaviour. Allowed, and nothing else:
+1. A method the generated interfaces now require: keep its signature on ONE line; body \`throw new NotImplementedException();\` (com.oracul.app.common.NotImplementedException) — in TypeScript \`return notImplemented();\` (src/app/not-implemented.ts).
+2. A missing switch branch: \`case X -> throw new NotImplementedException();\`; a missing map/record entry: \`[Key.X]: notImplemented(),\`.
+3. Renames exactly as declared in ${A.phaseDir}/02_specs/contract-notes.md ("Renamed: Old → New"), and changed signatures of the same method.
+4. Imports.
+No logic, no new fields, no deletions, no tests, no contract — ${node('checks/check-sync.mjs')} checks every added and removed line, and the slice's builders implement the behaviour later in the green stage. ${NO_E2E}`
+const countOf = (re, out) => { const m = String(out || '').match(re); return m ? Number(m[1]) : null }
+// → null when production code compiles (or the contract did not change), else the STOPPED result of stage red.
+async function contractSync() {
+  let compile = await sh(node('bin/compile-check.mjs', '--stage main --if-contract-changed'), `compile main ${S}`, { gate: true })
+  if (compile.exitCode === 0) return null
+  const stop = (why, output) => note('Contract sync stopped', `- ${why}\n- No tester ran; nothing parked. The user decides (a large or undeclared contract break).\n- Output:\n\n\`\`\`\n${String(output).slice(-2500)}\n\`\`\``)
+    .then(() => ({ stage: 'red', status: 'STOPPED', slice: S, failing: [`sync: ${why}`], output: String(output).slice(-1500) }))
+  if (infraReason(compile)) return stop(infraReason(compile), compile.output)
+  await sh(node('bin/state.mjs', 'set subStep sync'), 'state → sync')
+  let guard = { exitCode: 0, output: '' }
+  let prev = Infinity
+  for (let i = 1; i <= 4; i++) {
+    const errors = (compile.exitCode ? countOf(/COMPILE ERRORS: (\d+)/, compile.output) ?? 1 : 0) + (guard.exitCode ? countOf(/SYNC VIOLATIONS: (\d+)/, guard.output) ?? 1 : 0)
+    if (errors >= prev) return stop(`no progress after ${i - 1} sync round(s) — ${errors} problem(s) left`, `${guard.output}\n${compile.output}`)
+    prev = errors
+    const layers = ['backend', 'frontend'].filter((l) => new RegExp(`FAIL\\s+${l} main`).test(compile.output) || new RegExp(`${l}/src/`).test(guard.output))
+    const problems = `${guard.exitCode ? `check-sync rejected these lines — undo or replace them with marker stubs:\n${guard.output.slice(-2500)}\n\n` : ''}${compile.exitCode ? `Compiler output:\n${compile.output.slice(-4000)}` : ''}`
+    await parallel((layers.length ? layers : ['backend', 'frontend']).map((layer) => () => role(`${layer}-builder`, `${CTX}\n\n${SYNC_BRIEF}\n\nRound ${i} for ${S}, ${layer}:\n${problems}`, `${layer}: sync ${S} r${i}`, BUILDER_SCHEMA)))
+    guard = await sh(node('checks/check-sync.mjs'), `check-sync ${S} r${i}`, { gate: true })
+    compile = await sh(node('bin/compile-check.mjs', '--stage main'), `compile main ${S} r${i}`, { gate: true })
+    if (infraReason(guard) || infraReason(compile)) return stop(infraReason(guard) || infraReason(compile), `${guard.output}\n${compile.output}`)
+    if (guard.exitCode === 0 && compile.exitCode === 0) {
+      await note('Contract sync', `- Production code compiles again after ${i} round(s); check-sync: marker stubs, declarations and declared renames only.\n\n\`\`\`\n${guard.output.slice(-1200)}\n\`\`\``)
+      return null
+    }
+  }
+  return stop('production code still does not compile after 4 sync rounds', `${guard.output}\n${compile.output}`)
+}
+
 // ================================================================ stage red
 if (A.stage === 'red') {
   phase('Spec')
   if (!A.redFeedback) {
     await sh(`${node('bin/state.mjs', `set slice ${S}`)} && ${node('bin/state.mjs', `slice ${S} IN_PROGRESS`)} && ${node('bin/state.mjs', 'set subStep spec')}`, 'state → spec')
-    await role('analyst', `${CTX}\n\nStep 4a — slice spec delta for ${S}. Make the spec(s) covering ${FRS} and api/openapi.yaml precise enough to write failing tests without guessing (paths, payloads, statuses, ApiError.code values, UI route, data-testid names). Every FR of the slice must get the line "- Changes earlier behaviour: none | <old> → <new> (tests: <app-relative test files> | none)" — find those tests by grepping the existing tests for every path, field, error code, data-testid, ordering and outbound call this slice changes — and the line "- Ranges & invariants: none | <input ranges with valid/invalid classes, rules that must hold for all data>". Done when ${node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage spec`)} exits 0. Do not touch code or tests.`, `analyst: spec ${S}`)
+    await role('analyst', `${CTX}\n\nStep 4a — slice spec delta for ${S}. Make the spec(s) covering ${FRS} and api/openapi.yaml precise enough to write failing tests without guessing (paths, payloads, statuses, ApiError.code values, UI route, data-testid names). Every FR of the slice must get the line "- Changes earlier behaviour: none | <old> → <new> (tests: <app-relative test files> | none)" — find those tests by grepping the existing tests for every path, field, error code, data-testid, ordering and outbound call this slice changes — and the line "- Ranges & invariants: none | <input ranges with valid/invalid classes, rules that must hold for all data>". Keep contract changes additive where you can; declare every renamed schema, property or enum value in ${A.phaseDir}/02_specs/contract-notes.md as "Renamed: Old → New" (one line each), and list every existing test a changed response breaks under "Changes earlier behaviour". Done when ${node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage spec`)} exits 0. Do not touch code or tests.`, `analyst: spec ${S}`)
+  }
+  // Contract sync — on the first attempt and on every retry: a contract change can leave production code uncompilable,
+  // and only builders may touch it. They make it compile with marker stubs and declared renames; check-sync proves no
+  // behaviour was added. No progress → STOPPED (the user decides), never a doomed red retry.
+  phase('Sync')
+  const stopped = await contractSync()
+  if (stopped) return stopped
+  // Older tests that no longer compile after the contract change must be listed (the analyst), before the tester starts.
+  const listed = await sh(node('bin/compile-check.mjs', `--stage tests --slice ${S} --require-listed --if-contract-changed`), `older tests compile? ${S}`, { gate: true })
+  const unlisted = (listed.output.match(/^UNLISTED .*$/gm) || [])
+  if (unlisted.length) {
+    await sh(node('bin/state.mjs', 'set subStep spec'), 'state → spec (unlisted older tests)')
+    await role('analyst', `${CTX}\n\nStep 4a addendum for ${S}: after the contract change these existing tests no longer compile and are not listed under "Changes earlier behaviour":\n${unlisted.join('\n')}\nAdd each to the "Changes earlier behaviour" line of the FR whose change breaks it ("<old> → <new> (tests: <file>)"). Docs only. Done when ${node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage spec`)} exits 0.`, `analyst: list older tests ${S}`)
   }
   phase('Red')
   await sh(node('bin/state.mjs', 'set subStep red'), 'state → red')

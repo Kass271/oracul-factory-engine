@@ -34,6 +34,7 @@ Below, `$E` = engine path, `$APP` = appDir, `$PD` = phaseDir. Agents: subagent t
   - next phase → `node $E/bin/state.mjs phase new <short-name>`, then Step 0 (phase 02+ variant).
   - new app → Step 0 with a new name.
 - **"continue"** → resume at the current `step`/`subStep` (a STOPPED slice is IN_PROGRESS). Slice IN_PROGRESS: subStep `spec` → from stage `red`;
+  `sync` → stage `red` with `redFeedback: "resumed during contract sync"` (skips the spec step, reruns the sync);
   `red` → from red-check (Step 4.2); `test-fix`/`green`/`e2e`/`review` → stage `green` with `red: { exitCode: 0, output: "resumed" }`
   (the earlier red-evidence.md is still checked at close).
 
@@ -94,13 +95,19 @@ Loop:
    Emergency fallback only (if gates misbehave after an engine update): add `exitSource: "runner"` to the args.
    (pass args as a JSON object). If a stage returns `{error}`, the args did not arrive — rerun once; never treat it as a pass.
    1. `B` with `stage: "red"` — analyst spec delta (incl. `Changes earlier behaviour` and `Ranges & invariants` per FR)
-      + tester writes the RED tests, updates superseded tests and self-checks them with red-check.
+      → contract sync (only when a contract change broke the production compile: builders add marker stubs / declared
+      renames, `check-sync` proves no behaviour was added) → tester writes the RED tests, updates superseded tests and
+      self-checks them with red-check.
+      Result `{ stage: "red", status: "STOPPED", failing: ["sync: …"] }` → the contract break is too large or undeclared:
+      stop the phase, show the failing line and the slice's rounds.md "Contract sync stopped" note, ask the user.
    2. Run it yourself with the Bash tool, foreground, `timeout: 600000` (never through an agent):
       `node $E/bin/red-check.mjs --slice <next> --scope slice` — it runs the slice's related tests (Gradle + Angular).
       If the Bash call itself times out, rerun it with `run_in_background: true` and wait for its completion
       notification. A timeout is never a pass; take the exit code from the finished command only.
       Your run is the gate; the tester's own run was only its self-check.
    3. Exit ≠ 0 → once: `B` with `stage: "red"`, `redFeedback: <last 80 lines of the output>`, then red-check again (step 2).
+      The retry runs the contract sync again, so a `compile error in main|generated` line is repaired by builders, never
+      by the tester.
    4. `B` with `stage: "green"`, `red: { exitCode, output: <last 80 lines> }` from the last red-check. With a nonzero
       exitCode it writes the failure note and returns BLOCKED; otherwise builders → verify → E2E → review, up to 5 fix rounds.
       In fix rounds, failures caused by tests and review findings about tests go to the tester; the builders keep the code.

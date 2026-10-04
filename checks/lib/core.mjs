@@ -11,7 +11,7 @@ export const APPS_DIR = process.env.FACTORY_APPS_DIR || path.join(ROOT, 'apps');
 export const STATE_DIR = process.env.FACTORY_STATE_DIR || path.join(ENGINE, 'state');
 
 export const STEPS = ['00_setup', '01_scope', '02_specs', '03_plan', '04_build', '05_release'];
-export const SUBSTEPS = ['none', 'spec', 'red', 'test-fix', 'green', 'e2e', 'review', 'qa'];
+export const SUBSTEPS = ['none', 'spec', 'sync', 'red', 'test-fix', 'green', 'e2e', 'review', 'qa'];
 export const SLICE_STATUS = ['PENDING', 'IN_PROGRESS', 'DONE', 'BLOCKED'];
 
 // ---------- args ----------

@@ -43,6 +43,7 @@
     { "path": "docs/{phase}/05_release/qa/acceptance-report.md", "rule": "mentionsPhaseFrs" },
     { "path": "docs/{phase}/05_release/qa/acceptance-report.md", "rule": "evidenceLinks" },
     { "path": "docs/{phase}/05_release/qa/how-to-run.md", "rule": "contains:docker compose" },
-    { "path": "docs/{phase}/05_release/qa/screenshots", "rule": "screenshotPerUiFr" }
+    { "path": "docs/{phase}/05_release/qa/screenshots", "rule": "screenshotPerUiFr" },
+    { "path": "backend/src/main", "rule": "noSyncMarkers" }
   ]
 }

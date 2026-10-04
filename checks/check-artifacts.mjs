@@ -9,7 +9,7 @@
 // Output per item: PASS / MISSING / INVALID. Exit 1 on any MISSING/INVALID.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, Report, STEPS, context, exists, parseArgs, readJson, readText } from './lib/core.mjs';
+import { ENGINE, Report, STEPS, context, exists, parseArgs, readJson, readText, run } from './lib/core.mjs';
 import { allRequirements, frsOf, hasCycle, isApproved, parsePlan, parseRequirements, parseSpecFrs, parseSpecs, testLayer } from './lib/docs.mjs';
 
 const args = parseArgs();
@@ -119,6 +119,11 @@ const RULES = {
     const bad = (readText(p) || '').split('\n').filter((l) => l.includes('✔') && !/\]\([^)]+\)/.test(l) && /FR-\d+/.test(l));
     return !bad.length || `${bad.length} ✔ line(s) without an evidence link`;
   },
+  // Every contract operation implemented: no contract sync marker left (bin/../checks/check-sync.mjs --release).
+  noSyncMarkers: () => {
+    const res = run('node', [path.join(ENGINE, 'checks', 'check-sync.mjs'), '--release', '--app-dir', ctx.appDir, ...(ctx.app ? ['--app', ctx.app] : [])]);
+    return res.code === 0 || (res.out.split('\n').find((l) => /^INVALID/.test(l)) || 'sync markers left').replace(/^INVALID\s+/, '');
+  },
   screenshotPerUiFr: (p) => {
     const files = exists(p) ? fs.readdirSync(p) : [];
     const skip = blockedFrs();
@@ -144,7 +149,7 @@ function checkItem(item, slice) {
     const n = exists(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(path.extname(abs))).length : 0;
     return n >= Number(arg) ? r.pass(`${label} ${n} file(s)`) : r.missing(`${label} only ${n} file(s)`);
   }
-  const dirRule = ['specsCoverFrs', 'screenshotPerUiFr', 'sliceSpec'].includes(name);
+  const dirRule = ['specsCoverFrs', 'screenshotPerUiFr', 'sliceSpec', 'noSyncMarkers'].includes(name);
   if (!dirRule && !exists(abs)) return r.missing(label);
   const res = RULES[name] ? RULES[name](abs, arg, slice) : `unknown rule ${name}`;
   res === true ? r.pass(label) : r.invalid(`${label} — ${res}`);

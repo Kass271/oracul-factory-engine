@@ -2,6 +2,8 @@
 // PreToolUse guard (Edit|Write|MultiEdit|NotebookEdit|Bash). Blocks with exit 2:
 //   - any write into factory-engine/** (state changes go through `node factory-engine/bin/state.mjs`)
 //   - edits of generated code (frontend/src/app/api/**, backend/build/**)
+//   - subStep sync:   tests and api/openapi.yaml (builders only make production code compile after a contract change;
+//                     checks/check-sync.mjs proves they added no behaviour)
 //   - subStep red:    production code (tester writes tests only)
 //   - subStep test-fix: production code and api/openapi.yaml (tester repairs tests in a fix round)
 //   - subStep green:  tests and api/openapi.yaml (builders never change tests or the contract)
@@ -51,7 +53,7 @@ if (tool === 'Bash') {
 // Each segment is judged in the subStep it will run in: `state.mjs set subStep e2e && stack.mjs e2e` (the workflow's
 // own E2E step) is allowed, because the hook runs before the command and still sees the previous subStep.
 function stackViolation(command, startDir, startSub) {
-  const LOCKED_OUT = ['red', 'green', 'test-fix', 'review'];
+  const LOCKED_OUT = ['sync', 'red', 'green', 'test-fix', 'review'];
   let dir = startDir;
   let sub = startSub;
   for (const seg of command.split(/&&|\|\||[|;&\n]/)) {
@@ -110,6 +112,7 @@ const k = kind(rel);
 const sub = a.state.subStep;
 
 if (k === 'generated') block(`${rel} is generated from api/openapi.yaml — change the contract, never the generated code.`);
+if (sub === 'sync' && (k === 'test' || k === 'contract')) block(`${rel}: CONTRACT SYNC — only production code may change, and only to compile again (marker stubs, declared renames). Tests belong to the tester, the contract to the analyst.`);
 if (sub === 'red' && k === 'prod') block(`${rel}: RED phase — only tests may be written now. Production code comes in the GREEN phase.`);
 if (sub === 'test-fix' && (k === 'prod' || k === 'contract')) block(`${rel}: TEST-FIX round — the tester repairs tests only. Production code belongs to the builders, the contract to the analyst.`);
 if (sub === 'green' && k === 'test') block(`${rel}: GREEN phase — tests are locked. Make the existing tests pass; never edit a test to pass it.`);

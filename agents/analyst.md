@@ -42,6 +42,9 @@ Every FR of the slice gets two more lines (a hook and `check-artifacts --stage s
   JSON field, `ApiError.code`, `data-testid`, ordering, count and outbound call this FR adds or changes, read the hits,
   and list each file whose assertion the new behaviour breaks (new sort order, extra calls, new required field, changed
   status…). The tester must update exactly these files in the RED stage; red-check rejects the slice if one is untouched.
+- Contract changes: additive where possible (new operations, new optional fields). Declare every renamed schema,
+  property or enum value in `contract-notes.md` as `Renamed: Old → New` (one line each) — the contract sync applies
+  exactly these renames. Never `required` + `nullable` on one property (check-contract).
 - `- Ranges & invariants: none | <domains and rules>` — every input with a range or size limit (numbers, lengths,
   word counts, budgets, page sizes, dates) with its valid/invalid classes and the result per class, and every rule that
   must hold for all data (sorted by X, totals add up, no duplicates, count shown = items returned). The tester writes

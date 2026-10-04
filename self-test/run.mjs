@@ -568,6 +568,45 @@ test('migrate red: a customised Playwright config (own outputDir) is refused', 0
 test('migrate red: refuses to run mid-slice', 1, (sb) => { oldApp(sb); sb.state({ subStep: 'green' }); return migrate(sb); }, (sb) => sb.read('backend/Dockerfile') === OLD_DF || 'changed mid-slice');
 test('migrate green: --check works mid-slice and changes nothing', 10, (sb) => { oldApp(sb); sb.state({ subStep: 'green' }); return migrate(sb, ['--check']); });
 
+// ---------------- WP-G: contract sync — builders make production compile again, check-sync proves no behaviour
+const CTRL = 'backend/src/main/java/com/oracul/app/rooms/RoomsController.java';
+const CTRL_V1 = 'package com.oracul.app.rooms;\n\nimport com.oracul.app.api.RoomsApi;\n\npublic class RoomsController implements RoomsApi {\n    @Override\n    public ResponseEntity<RoomDto> listRooms(String q) {\n        RoomDto dto = mapper.toDto(service.all(q));\n        return ResponseEntity.ok(dto);\n    }\n}\n';
+const syncBase = (sb) => { sb.put(CTRL, CTRL_V1); gitApp(sb); };
+const STUB = '    @Override\n    public ResponseEntity<RoomDto> getRoom(String id) {\n        throw new NotImplementedException();\n    }\n}\n';
+const addToCtrl = (sb, text) => sb.put(CTRL, CTRL_V1.replace(/}\n$/, text));
+test('sync green: a marker stub for a method the interface now requires', 0, (sb) => {
+  syncBase(sb); addToCtrl(sb, STUB); sb.edit(CTRL, 'import com.oracul.app.api.RoomsApi;', 'import com.oracul.app.api.RoomsApi;\nimport com.oracul.app.common.NotImplementedException;');
+  return node(sb, 'checks/check-sync.mjs');
+});
+test('sync red: behaviour added during the sync', 1, (sb) => { syncBase(sb); addToCtrl(sb, STUB.replace('throw new NotImplementedException();', 'return ResponseEntity.ok(service.one(id));')); return node(sb, 'checks/check-sync.mjs'); },
+  (sb, r) => (/SYNC VIOLATIONS: 1/.test(r.out) && /return ResponseEntity\.ok\(service\.one\(id\)\)/.test(r.out)) || r.out);
+test('sync green: a rename declared in contract-notes.md', 0, (sb) => {
+  syncBase(sb); sb.put('docs/phase-01_mvp/02_specs/contract-notes.md', '# Contract notes\n\n- Renamed: RoomDto → RoomView\n');
+  sb.put(CTRL, CTRL_V1.replace(/RoomDto/g, 'RoomView')); return node(sb, 'checks/check-sync.mjs');
+});
+test('sync red: the same rename, not declared', 1, (sb) => { syncBase(sb); sb.put(CTRL, CTRL_V1.replace(/RoomDto/g, 'RoomView')); return node(sb, 'checks/check-sync.mjs'); });
+test('sync green: a changed signature of the same method (the operation gained a parameter)', 0, (sb) => { syncBase(sb); sb.edit(CTRL, 'listRooms(String q)', 'listRooms(String q, Integer page)'); return node(sb, 'checks/check-sync.mjs'); });
+test('sync red: code deleted during the sync', 1, (sb) => { syncBase(sb); sb.edit(CTRL, '        RoomDto dto = mapper.toDto(service.all(q));\n', ''); return node(sb, 'checks/check-sync.mjs'); });
+test('sync green: the marker class from the template may be added', 0, (sb) => {
+  syncBase(sb); sb.put('backend/src/main/java/com/oracul/app/common/NotImplementedException.java', fs.readFileSync(path.join(ENGINE, 'templates/app/backend/src/main/java/com/oracul/app/common/NotImplementedException.java'), 'utf8'));
+  return node(sb, 'checks/check-sync.mjs');
+});
+test('sync red (release): a marker is left in production code', 1, (sb) => { sb.put(CTRL, CTRL_V1.replace(/}\n$/, STUB)); return node(sb, 'checks/check-sync.mjs', ['--release']); },
+  (sb, r) => /sync markers left/.test(r.out) || r.out);
+test('sync green (release): no marker left', 0, (sb) => { sb.put(CTRL, CTRL_V1); return node(sb, 'checks/check-sync.mjs', ['--release']); });
+test('artifacts red: release with a sync marker left', 1, (sb) => {
+  sb.put('../../state/apps/fixture/last-run.json', JSON.stringify({ layers: { backend: { exit: 0 }, frontend: { exit: 0 } } }));
+  node(sb, 'checks/gen-traceability.mjs'); sb.put(CTRL, CTRL_V1.replace(/}\n$/, STUB));
+  return node(sb, 'checks/check-artifacts.mjs', ['--step', '05_release']);
+}, (sb, r) => /noSyncMarkers/.test(r.out) || r.out);
+test('state green: set subStep sync', 0, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'sync']));
+test('subagent-stop red: a builder leaves behaviour in the sync', 2, (sb) => {
+  syncBase(sb); addToCtrl(sb, STUB.replace('throw new NotImplementedException();', 'return null;'));
+  sb.state({ step: '04_build', subStep: 'sync', slice: '01_rooms' });
+  return hook(sb, 'subagent-stop', { agent_type: 'oracul:backend-builder' });
+}, (sb, r) => /return null;/.test(r.out) || r.out);
+test('subagent-stop green: a clean sync', 0, (sb) => { syncBase(sb); addToCtrl(sb, STUB); sb.state({ step: '04_build', subStep: 'sync', slice: '01_rooms' }); return hook(sb, 'subagent-stop', { agent_type: 'oracul:backend-builder' }); });
+
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 test('guard red: write into factory-engine', 2, (sb) => hook(sb, 'guard-edits', W(path.join(ENGINE, 'checks', 'verify.mjs'))));
@@ -640,6 +679,11 @@ test('guard green: the refusal tells the agent to report and stop, not to improv
   (sb, r) => (/report its reason and stop/.test(r.out) && /never run Playwright or docker compose yourself/.test(r.out)) || r.out);
 test('stack green: a refused scratch run names the migration and forbids running Playwright yourself', 1, (sb) => node(sb, 'bin/stack.mjs', ['e2e', '--scratch', '--grep', 'rooms.spec.ts', '--dry-run']),
   (sb, r) => (/migration pending/.test(r.out) && /Do not run Playwright yourself/.test(r.out)) || r.out);
+
+test('guard green: SYNC edits production code', 0, (sb) => { sb.state({ subStep: 'sync' }); return hook(sb, 'guard-edits', W(sb.p(CTRL))); });
+test('guard red: SYNC edits a test', 2, (sb) => { sb.state({ subStep: 'sync' }); return hook(sb, 'guard-edits', W(sb.p('backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java'))); });
+test('guard red: SYNC edits the contract', 2, (sb) => { sb.state({ subStep: 'sync' }); return hook(sb, 'guard-edits', W(sb.p('api/openapi.yaml'))); });
+test('guard red: SYNC runs the stack', 2, (sb) => bash(sb, 'sync', `node ${STACK} up`));
 
 // ---------------- stack lock + scratch runs (no Docker: --dry-run stops before compose/Playwright)
 const LOCK = (sb) => path.join(sb.stateDir, 'apps/fixture/stack.lock');
@@ -1065,6 +1109,36 @@ wf('workflow green: every round increments the round counter exactly once, with 
   const standalone = cmds.filter((c) => /^node "[^"]*state\.mjs" (round \+1|set subStep \S+)$/.test(c.trim())).length;
   return incs === 2 && standalone <= 3 ? 0 : 1;
 });
+// stage red with the contract sync (stub compile results)
+const syncAnswer = ({ compiles = [1, 0], guard = [0], unlisted = false } = {}) => { let c = 0, g = 0; return (p, o) => {
+  if (/compile-check\.mjs" --stage main/.test(p)) { const code = compiles[Math.min(c++, compiles.length - 1)]; return { exitCode: code, output: code ? 'FAIL     backend main\nCOMPILE ERRORS: 3 (main 3)' : 'COMPILE OK' }; }
+  if (/check-sync\.mjs"/.test(p)) { const code = guard[Math.min(g++, guard.length - 1)]; return { exitCode: code, output: `SYNC VIOLATIONS: ${code}` }; }
+  if (/--require-listed/.test(p)) return unlisted ? { exitCode: 1, output: 'UNLISTED backend/src/test/java/com/oracul/app/old/OldIT.java — …' } : { exitCode: 0, output: 'COMPILE OK' };
+  return ok0(p, o);
+}; };
+const labelsOf = (calls) => calls.map((c) => c.opts.label || '');
+wf('workflow green: stage red — production compiles → no sync, the tester runs', 0, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [0] }), ({ result, calls }) =>
+  (result.stage === 'red' && !result.status && !calls.some((c) => /set subStep sync/.test(c.prompt)) && labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 0 : 1));
+wf('workflow green: stage red — contract broke the compile → sync builder, check-sync, compile again, then the tester', 0, wfArgs({ stage: 'red' }), syncAnswer(), ({ result, calls }) => {
+  const L = labelsOf(calls);
+  const i = (re) => L.findIndex((l) => re.test(l));
+  const sync = calls.findIndex((c) => /set subStep sync/.test(c.prompt));
+  const builder = i(/^backend: sync 01_rooms r1$/), guard = i(/^run: check-sync 01_rooms r1$/), tester = i(/^tester: red/);
+  const prompt = calls[builder]?.prompt || '';
+  return !result.status && sync >= 0 && builder > sync && guard > builder && tester > guard && !L.includes('frontend: sync 01_rooms r1')
+    && /NotImplementedException/.test(prompt) && /COMPILE ERRORS: 3/.test(prompt) ? 0 : 1;
+});
+wf('workflow red: stage red — the sync makes no progress → STOPPED "sync: …", no tester', 1, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [1] }), ({ result, calls }) =>
+  (result.status === 'STOPPED' && /^sync: no progress/.test(result.failing[0]) && !labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 1 : 0));
+wf('workflow red: stage red — check-sync keeps rejecting → STOPPED, no tester', 1, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [1, 0], guard: [2] }), ({ result, calls }) =>
+  (result.status === 'STOPPED' && !labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 1 : 0));
+wf('workflow green: stage red retry (redFeedback) runs the sync again — problem 6', 0, wfArgs({ stage: 'red', redFeedback: 'WRONG-REASON: backend: compile error in main (3)' }), syncAnswer(), ({ calls }) =>
+  (labelsOf(calls).some((l) => /^backend: sync 01_rooms r1$/.test(l)) && !labelsOf(calls).some((l) => /^analyst: spec/.test(l)) ? 0 : 1));
+wf('workflow green: unlisted older tests → the analyst lists them before the tester starts', 0, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [0], unlisted: true }), ({ calls }) => {
+  const L = labelsOf(calls);
+  const a = L.findIndex((l) => /^analyst: list older tests 01_rooms$/.test(l)), t = L.findIndex((l) => /^tester: red/.test(l));
+  return a >= 0 && t > a && /OldIT\.java/.test(calls[a].prompt) ? 0 : 1;
+});
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
   const stripped = tester.prompt.replace(/red-check/g, 'xxx');
@@ -1348,6 +1422,14 @@ async function replayThroughHook(file, args, answer, source, { execute = false }
   return { result, blocked, executed, closeOutputs };
 }
 const e2eFailsOnce = () => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: `E2E FAIL\n${BLOCK}` } : ok0(p, o)); };
+{
+  const name = 'replay green: build-slice red stage with a contract sync — every command passes the guard';
+  if (!filter || name.includes(filter)) {
+    let got, note = '';
+    try { const r = await replayThroughHook('build-slice.js', wfArgs({ stage: 'red' }), syncAnswer()); got = r.blocked.length ? 1 : 0; note = r.blocked.join(' | '); } catch (e) { got = 'ERR'; note = String(e); }
+    results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
+  }
+}
 for (const [name, file, args] of [
   ['replay green: build-slice green stage — every command passes the guard', 'build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } })],
   ['replay green: build-slice red stage — every command passes the guard', 'build-slice.js', wfArgs({ stage: 'red' })],
