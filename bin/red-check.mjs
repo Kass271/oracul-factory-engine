@@ -8,7 +8,7 @@
 // Exit 0 = valid RED · 1 = not red (tests pass, missing, or not updated) · 2 = red for the wrong reason
 import fs from 'node:fs';
 import path from 'node:path';
-import { context, parseArgs, run, tail, today } from '../checks/lib/core.mjs';
+import { context, parseArgs, run, tail, today, took } from '../checks/lib/core.mjs';
 import { collectTraces, parsePlan } from '../checks/lib/docs.mjs';
 import { analyseRed } from '../checks/lib/red.mjs';
 
@@ -25,9 +25,11 @@ const since = Date.now() - 1000;
 const layers = {};
 for (const layer of testLayers) {
   const cwd = path.join(ctx.appDir, layer);
+  const t0 = Date.now();
   layers[layer] = layer === 'backend'
     ? run('./gradlew', ['test', '--console=plain', '--continue'], { cwd })
     : run('npm', ['run', 'test:ci', '--silent'], { cwd, env: { ...process.env, CI: 'true' } });
+  console.log(`${layer} tests took ${took(Date.now() - t0)}`);
 }
 // Test files the tester added or changed (null when git is not available → those checks are skipped).
 const g = run('git', ['-C', ctx.appDir, 'status', '--porcelain', '--untracked-files=all', '--', 'backend/src/test', 'frontend/src', 'e2e/tests']);

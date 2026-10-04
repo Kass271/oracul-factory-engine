@@ -12,6 +12,7 @@ import { ENGINE } from '../checks/lib/core.mjs';
 import { analyseRed } from '../checks/lib/red.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
+import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
 const SPEC = 'docs/phase-01_mvp/02_specs/rooms.md';
@@ -319,6 +320,46 @@ test('state green: set subStep test-fix', 0, (sb) => node(sb, 'bin/state.mjs', [
 test('state green: set subStep e2e', 0, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'e2e']),
   (sb) => JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/state.json'), 'utf8')).subStep === 'e2e' || 'subStep not stored');
 test('state red: set unknown subStep', 1, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'test-fixing']));
+
+// ---------------- timings (A1): every subStep change is logged next to state.json; logging never fails a command
+const TIMINGS = (sb) => path.join(sb.stateDir, 'apps/fixture/timings.jsonl');
+const timingRows = (sb) => (fs.existsSync(TIMINGS(sb)) ? fs.readFileSync(TIMINGS(sb), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+test('timings green: set subStep logs from → to with slice and round', 0, (sb) => {
+  sb.state({ slice: '01_rooms', round: 2, subStep: 'green' });
+  return node(sb, 'bin/state.mjs', ['set', 'subStep', 'review']);
+}, (sb) => { const r = timingRows(sb); return (r.length === 1 && r[0].from === 'green' && r[0].to === 'review' && r[0].slice === '01_rooms' && r[0].round === 2 && !!r[0].at) || JSON.stringify(r); });
+test('timings green: setting the same subStep again logs nothing', 0, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'none']), (sb) => timingRows(sb).length === 0 || 'logged a no-op');
+test('timings red: an unknown subStep is refused and not logged', 1, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'bogus']), (sb) => timingRows(sb).length === 0 || 'logged a refused change');
+test('timings green: an unwritable timings file never fails set subStep', 0, (sb) => { fs.mkdirSync(TIMINGS(sb), { recursive: true }); return node(sb, 'bin/state.mjs', ['set', 'subStep', 'red']); },
+  (sb) => JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/state.json'), 'utf8')).subStep === 'red' || 'subStep not stored');
+test('timings green: summary per slice and subStep, malformed lines skipped', 0, () => {
+  const t = (s) => new Date(Date.parse('2026-10-04T10:00:00Z') + s * 1000).toISOString();
+  const text = [
+    JSON.stringify({ at: t(0), slice: '01_a', from: 'none', to: 'red' }), 'not json', JSON.stringify({ to: 'x' }),
+    JSON.stringify({ at: t(600), slice: '01_a', from: 'red', to: 'green' }), JSON.stringify({ at: t(900), slice: '01_a', from: 'green', to: 'red' }),
+    JSON.stringify({ at: t(960), slice: '01_a', from: 'red', to: 'none' }), JSON.stringify({ at: t(1000), slice: '02_b', from: 'none', to: 'spec' }),
+  ].join('\n');
+  const sum = summariseTimings(text, Date.parse(t(1060)));
+  const a = sum.find((x) => x.slice === '01_a');
+  const b = sum.find((x) => x.slice === '02_b');
+  const red = a?.steps.find((x) => x.subStep === 'red')?.ms;
+  const ok = sum.length === 2 && red === 660_000 && a.total === 960_000 && b.total === 60_000;
+  return { code: ok ? 0 : 1, out: JSON.stringify(sum) };
+});
+test('timings green: state.mjs timings prints the summary', 0, (sb) => {
+  sb.state({ slice: '01_rooms', subStep: 'none' });
+  node(sb, 'bin/state.mjs', ['set', 'subStep', 'red']);
+  return node(sb, 'bin/state.mjs', ['timings']);
+}, (sb, r) => /01_rooms: \d+s — red \d+s/.test(r.out) || r.out);
+test('slow report green: slowest classes and Spring context starts from the JUnit XML', 0, (sb) => {
+  const dir = sb.p('backend/build/test-results/test');
+  sb.put('backend/build/test-results/test/TEST-a.SlowIT.xml', '<testsuite name="a.SlowIT" tests="3" time="42.5"><system-out>Started SlowIT in 9.1 seconds</system-out></testsuite>');
+  sb.put('backend/build/test-results/test/TEST-a.FastTest.xml', '<testsuite name="a.FastTest" tests="1" time="0.2"><system-out>Started FastTest in 1.0 seconds</system-out></testsuite>');
+  const top = slowestClasses(dir, 10);
+  const ok = top[0].name === 'a.SlowIT' && top[0].seconds === 42.5 && top[0].tests === 3 && springContexts(dir) >= 2;
+  return { code: ok ? 0 : 1, out: JSON.stringify(top) };
+});
+test('slow report green: no test results → empty, no error', 0, (sb) => { sb.rm('backend/build/test-results'); return { code: slowestClasses(sb.p('backend/build/test-results/test')).length ? 1 : 0, out: '' }; });
 
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });

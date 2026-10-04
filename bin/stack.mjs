@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { context, e2eRunPath, parseArgs, readJson, run, stackLockPath, tail, writeJson } from '../checks/lib/core.mjs';
+import { context, e2eRunPath, parseArgs, readJson, run, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
 import { SCRATCH, e2eEnv, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { acquire, alive } from '../checks/lib/lock.mjs';
 
@@ -53,6 +53,7 @@ async function waitUp(timeoutS = 300) {
 }
 
 async function up() {
+  const t0 = Date.now();
   console.log('docker compose up -d --build …');
   compose('up', '-d', '--build');
   if (!(await waitUp())) {
@@ -60,7 +61,7 @@ async function up() {
     console.error(tail(run('docker', ['compose', 'logs', '--tail', '60'], { cwd: ctx.appDir }).out, 80));
     process.exit(1);
   }
-  console.log(`UP  frontend ${URLS.frontend}  ·  backend http://localhost:8080/api  ·  health ${URLS.backend}`);
+  console.log(`UP  frontend ${URLS.frontend}  ·  backend http://localhost:8080/api  ·  health ${URLS.backend}  (took ${took(Date.now() - t0)})`);
 }
 
 async function locked(name, onBusy = () => {}) {
@@ -149,11 +150,13 @@ switch (cmd) {
     }
     if (!args['no-up']) await up();
     const e2eDir = path.join(ctx.appDir, 'e2e');
+    const tE = Date.now();
     const r = override
       ? run(override[0], override.slice(1), { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } })
       : run('npx', pwArgs, { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } });
     const block = r.code ? failureBlock(readJson(path.join(e2eDir, scratch ? SCRATCH.report : 'report', 'results.json')), ctx.appDir) : '';
     console.log(tail(r.out, block ? 15 : 60));
+    console.log(`Playwright took ${took(Date.now() - tE)}`);
     console.log(`${scratch ? 'SCRATCH ' : ''}${r.code ? 'E2E FAIL' : 'E2E PASS'}${scratch ? ' (not evidence — the workflow E2E step decides)' : ''}`);
     if (block) console.log(block);
     if (worker) writeJson(RUN.status, { state: 'done', code: r.code ? 1 : 0, pid: process.pid, finishedAt: new Date().toISOString() });

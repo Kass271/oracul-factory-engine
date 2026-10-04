@@ -6,7 +6,8 @@
 // Writes state/apps/<app>/last-run.json and state.lastVerify. Exit 0 = GREEN, 1 = RED.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, STEPS, context, lastRunPath, loadState, parseArgs, run, saveState, tail, walk, writeJson } from './lib/core.mjs';
+import { ENGINE, STEPS, context, lastRunPath, loadState, parseArgs, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
+import { slowReport } from './lib/timing.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -36,6 +37,7 @@ if (args['reuse-if-fresh']) {
   console.log(`verify: ${why} — running a full verify`);
 }
 
+const T0 = Date.now();
 const pass = ['app', 'app-dir', 'phase'].flatMap((k) => (args[k] ? [`--${k}`, String(args[k])] : []));
 const failing = [];
 const layers = {};
@@ -55,6 +57,8 @@ if (!args.quick) {
   layer('backend', path.join(ctx.appDir, 'backend'), './gradlew', ['test', 'jacocoTestReport', '--console=plain', '-q']);
   layer('frontend', path.join(ctx.appDir, 'frontend'), 'npm', ['run', 'test:ci', '--silent']);
   writeJson(lastRunPath(ctx.app || 'fixture'), { at: new Date().toISOString(), layers });
+  const slow = slowReport(path.join(ctx.appDir, 'backend/build/test-results/test'));
+  if (slow) console.log(`\n${slow}`);
 }
 
 function check(name, extra = []) {
@@ -77,5 +81,6 @@ if (ctx.app && loadState(ctx.app)) {
   st.lastVerify = { at: new Date().toISOString(), result, failing, quick: !!args.quick };
   saveState(ctx.app, st);
 }
+console.log(`\nverify took ${took(Date.now() - T0)}`);
 console.log(`\n==== VERIFY ${result}${failing.length ? `: ${failing.join(' · ')}` : ''} ====`);
 process.exit(failing.length ? 1 : 0);

@@ -60,6 +60,22 @@ export const lastRunPath = (app) => path.join(STATE_DIR, 'apps', app, 'last-run.
 export const stackLockPath = (app) => path.join(STATE_DIR, 'apps', app, 'stack.lock');
 // Detached E2E run (stack.mjs e2e --detach / e2e-wait): status JSON + log of the background worker.
 export const e2eRunPath = (app, ext) => path.join(STATE_DIR, 'apps', app, `e2e-run.${ext}`);
+// Runtime records next to state.json (never inside it, so the state format stays unchanged):
+export const timingsPath = (app) => path.join(STATE_DIR, 'apps', app, 'timings.jsonl'); // one line per subStep change
+export const flakyPath = (app) => path.join(STATE_DIR, 'apps', app, 'flaky.json'); // tests that passed only on retry
+export const stackHashPath = (app) => path.join(STATE_DIR, 'apps', app, 'stack-hash.json'); // inputs of the built images
+export const e2eLastPath = (app) => path.join(STATE_DIR, 'apps', app, 'e2e-last.json'); // last official full E2E run
+export const lastFailuresPath = (app) => path.join(STATE_DIR, 'apps', app, 'last-failures.json'); // failing tests of the last verify
+export const migrationsPath = (app) => path.join(STATE_DIR, 'apps', app, 'migrations.json'); // applied / refused migrations
+// Append a timing record; a logging problem never fails the command that logs.
+export function appendTiming(app, entry) {
+  try {
+    fs.mkdirSync(path.dirname(timingsPath(app)), { recursive: true });
+    fs.appendFileSync(timingsPath(app), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
+  } catch { /* timings are informational */ }
+}
+// "took 12s" / "took 3m 05s"
+export const took = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; };
 export const loadActive = () => readJson(activePath());
 export const loadState = (app) => readJson(statePath(app));
 export const saveState = (app, s) => writeJson(statePath(app), s);

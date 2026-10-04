@@ -14,12 +14,15 @@
 //   impact <slice>                          slices that depend on <slice> (STOP if any)
 //   approve scope|plan                      stamp the doc "Status: APPROVED ✔ <date>" + record it
 //   next-fr                                 next free FR / NFR numbers across all phases
+//   timings [--json]                        time per subStep per slice (from timings.jsonl, read-only)
+//   flaky [--json]                          tests that passed only on retry (from flaky.json, read-only)
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   APPS_DIR, ENGINE, ROOT, STEPS, SUBSTEPS, SLICE_STATUS, context, listPhases, loadActive, loadState,
-  parseArgs, saveState, statePath, today, writeJson, activePath, exists, readText,
+  parseArgs, saveState, statePath, today, writeJson, activePath, exists, readText, appendTiming, timingsPath, flakyPath, readJson,
 } from '../checks/lib/core.mjs';
+import { formatTimings, summariseTimings } from '../checks/lib/timing.mjs';
 import { allRequirements, dependents, parsePlan } from '../checks/lib/docs.mjs';
 
 const args = parseArgs();
@@ -94,6 +97,7 @@ switch (cmd) {
     const allowed = { step: STEPS, subStep: SUBSTEPS };
     if (!['step', 'slice', 'subStep'].includes(a1)) die('set step|slice|subStep <value>');
     if (allowed[a1] && !allowed[a1].includes(a2)) die(`${a1} must be one of ${allowed[a1].join(', ')}`);
+    if (a1 === 'subStep' && ctx.state.subStep !== a2) appendTiming(ctx.app, { slice: ctx.state.slice, round: ctx.state.round, from: ctx.state.subStep, to: a2 });
     ctx.state[a1] = a2 === 'none' && a1 === 'slice' ? null : a2;
     if (a1 === 'slice') ctx.state.round = 0;
     save(ctx);
@@ -162,6 +166,21 @@ switch (cmd) {
     const reqs = allRequirements(ctx.appDir);
     const max = (k) => Math.max(0, ...reqs.filter((r) => r.kind === k).map((r) => r.num));
     console.log(JSON.stringify({ nextFR: `FR-${max('FR') + 1}`, nextNFR: `NFR-${max('NFR') + 1}` }));
+    break;
+  }
+  case 'timings': {
+    const ctx = need();
+    const summary = summariseTimings(readText(timingsPath(ctx.app)) || '', Date.now());
+    if (args.json) console.log(JSON.stringify(summary));
+    else console.log(summary.length ? formatTimings(summary) : 'no timings recorded yet');
+    break;
+  }
+  case 'flaky': {
+    const ctx = need();
+    const f = readJson(flakyPath(ctx.app), { tests: {} });
+    const list = Object.entries(f.tests || {}).map(([test, v]) => ({ test, ...v, persistent: (v.slices || []).length >= 2 }));
+    if (args.json) console.log(JSON.stringify(list));
+    else console.log(list.length ? list.map((t) => `${t.persistent ? 'PERSISTENT ' : ''}FLAKY ${t.test} — seen ${t.count}× in ${(t.slices || []).join(', ') || '-'} (last ${t.lastSeen})`).join('\n') : 'no flaky tests recorded');
     break;
   }
   default:
