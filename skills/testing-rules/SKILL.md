@@ -137,5 +137,20 @@ broken. The usual test bugs:
 - **Unfinished async work** — a run/job/subscription started by one test must be awaited or cancelled before it ends.
 - **Unreachable expectations** — values that contradict the fixture data or the spec (wrong count, wrong order).
 
+## Fast, deterministic suites
+Every gate runs the backend suite; a slow or flaky suite slows every slice. `verify` prints the slowest test classes and
+the number of Spring context starts, and records tests that passed only on retry (`state.mjs flaky`).
+- **One Spring context.** Each distinct test configuration (`@MockitoBean` set, properties, profiles, `@Import`) starts
+  a new context. Put integration tests on one shared base class with one configuration; stub outbound systems with one
+  shared fake (reset in `@BeforeEach`), not per-class `@MockitoBean` variations.
+- **One container.** Reuse the Testcontainers database for the whole run (singleton / `@ServiceConnection` on the shared
+  configuration); never start a container per class.
+- **Wait for a condition, never a fixed time.** Async results are awaited with a bounded poll on the condition
+  (Awaitility `await().atMost(…).until(…)`), never `Thread.sleep` — sleeps are slow when they are long and flaky when
+  they are short.
+- **Own data.** Unique ids per test; assert on the test's own rows, never on global counts (they break under retries and
+  parallel runs).
+- A test in `state.mjs flaky` marked PERSISTENT is a test bug: fix it in the next test-fix round, do not leave it.
+
 ## Coverage
 Coverage may never drop (`check-coverage`). Cover error paths, not getters.
