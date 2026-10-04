@@ -241,5 +241,49 @@ step('final verify (quick) + stop hook lets the session end', 0, () => {
   return v.code ? v : hook('stop', { stop_hook_active: false });
 });
 step('release commit', 0, () => sh('bin/commit.mjs', ['--message', `${PHASE} 05_release: GREEN`]));
+
+// ---------------------------------------------------------------- the contract grows (WP-P proofs on the real stack)
+const curl = (a) => { const x = spawnSync('curl', ['-s', ...a], { encoding: 'utf8' }); return { code: x.status, out: x.stdout || '' }; };
+step('contract grows (new operation + optional field) → production still compiles: 501 default method, constructors unchanged', 0, () => {
+  const f = path.join(appDir, 'api', 'openapi.yaml');
+  let t = fs.readFileSync(f, 'utf8');
+  t = t.replace('components:\n  schemas:', `  /api/todos/{id}:
+    get:
+      tags: [todos]
+      operationId: getTodo
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: One todo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Todo'
+components:
+  schemas:`).replace(/(    Todo:\n      type: object\n      required: \[id, title, done\]\n      properties:\n)/, '$1        note:\n          type: string\n          nullable: true\n');
+  fs.writeFileSync(f, t);
+  const c = sh('checks/check-contract.mjs');
+  if (c.code) return c;
+  return sh('bin/compile-check.mjs', ['--layer', 'backend']);
+});
+step('stack up after the contract change (images rebuilt: their inputs changed)', 0, () => {
+  const r = sh('bin/stack.mjs', ['up']);
+  return r.code === 0 && /image inputs changed/.test(r.out) ? r : { code: r.code || 1, out: r.out };
+});
+step('the new operation answers 501 until a slice implements it', 0, () => {
+  const r = curl(['-o', '/dev/null', '-w', '%{http_code}', 'http://localhost:8080/api/todos/1']);
+  return { code: r.out.trim() === '501' ? 0 : 1, out: `HTTP ${r.out}` };
+});
+step('a null optional field is left out of the JSON (null convention)', 0, () => {
+  curl(['-X', 'POST', '-H', 'Content-Type: application/json', '-d', '{"title":"smoke null"}', 'http://localhost:8080/api/todos']);
+  const r = curl(['http://localhost:8080/api/todos']);
+  return { code: /"title":"smoke null"/.test(r.out) && !/"note"/.test(r.out) ? 0 : 1, out: r.out.slice(0, 400) };
+});
 console.log('\n' + fs.readFileSync(path.join(docs('05_release'), 'qa', 'traceability.md'), 'utf8'));
 finish(0);
