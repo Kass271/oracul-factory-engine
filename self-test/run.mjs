@@ -719,6 +719,18 @@ wf('workflow green: close = re-verify if needed → artifacts → coverage --upd
   const at = ['verify.mjs" --reuse-if-fresh', 'check-artifacts.mjs" --step 04_build --slice 01_rooms --stage done', 'check-coverage.mjs" --update', 'commit.mjs" --message', 'slice 01_rooms DONE', 'set subStep none', 'ORACUL_EXIT'].map((x) => p.indexOf(x));
   return at.every((v, i) => v >= 0 && (i === 0 || v > at[i - 1])) ? 0 : 1;
 });
+const START = /check-artifacts\.mjs" --step 04_build --slice 01_rooms --stage red/;
+const builders = (calls) => calls.filter((c) => /^(backend|frontend): /.test(c.opts.label || '')).length;
+wf('workflow red: slice spec lines missing at green start → STOPPED "start: INVALID …", no builder ran', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (START.test(p) ? { exitCode: 1, output: 'INVALID  docs/phase-01_mvp/02_specs [sliceSpec] — FR-1 (rooms.md) lacks "- Ranges & invariants: none | <ranges and invariants>"\nRESULT  FAIL (1 problem)' } : ok0(p, o)),
+  ({ result, calls }) => (result.status === 'STOPPED' && result.failing.some((f) => /^start: INVALID .*Ranges & invariants/.test(f)) && builders(calls) === 0 && !parked(calls) ? 1 : 0));
+wf('workflow green: complete docs at green start → the builders run', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) => {
+  const i = calls.findIndex((c) => START.test(c.prompt));
+  const firstBuilder = calls.findIndex((c) => /^(backend|frontend): /.test(c.opts.label || ''));
+  return result.status === 'DONE' && i >= 0 && firstBuilder > i ? 0 : 1;
+});
+wf('workflow green: a failed red-check skips the start check (BLOCKED as before)', 0, wfArgs({ stage: 'green', red: { exitCode: 2, output: 'COMPILE-ERROR' } }), ok0, ({ result, calls }) =>
+  (result.status === 'BLOCKED' && !calls.some((c) => START.test(c.prompt)) ? 0 : 1));
 const between = (calls, from, to) => calls.slice(from + 1, to);
 wf('workflow green: stack busy once → rerun, no fix round, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(1), ({ result, calls }) => {
   const idx = calls.map((c, i) => (/stack\.mjs" e2e/.test(c.prompt) ? i : -1)).filter((i) => i >= 0);
@@ -880,6 +892,7 @@ async function replayThroughHook(file, args, answer, source, { execute = false }
         if (o.label.startsWith('run: close ') && !(/ORACUL_EXIT=0\s*$/.test(out.trimEnd() + '\n') && /verify: reusing the full GREEN verify/.test(out)))
           blocked.push(`${o.label}: close chain did not pass via the reuse path: ${out.trim().slice(-300)}`);
         if (o.label.startsWith('run: close ')) closeOutputs.push(out);
+        if (o.label.startsWith('run: start checks ') && !/ORACUL_EXIT=0\s*$/.test(out.trimEnd() + '\n')) blocked.push(`${o.label}: start check failed on the fixture: ${out.trim().slice(-300)}`);
       }
       for (const m of cmd.matchAll(/set subStep (\S+)/g)) sb.state({ subStep: m[1] });
     }

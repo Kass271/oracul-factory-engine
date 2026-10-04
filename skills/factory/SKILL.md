@@ -107,6 +107,10 @@ Loop:
    Result `STOPPED` with failing `close: …` → the slice passed verify, E2E and review but its close step failed
    (the line says which check). Its code is kept, nothing was committed or parked. Tell the user what failed;
    never mark the slice DONE by hand; "continue" resumes it at stage `green`.
+   Result `STOPPED` with failing `start: …` → the green stage refused to start because a doc the close step needs is
+   missing or invalid; no builder ran. If it names `02_specs` (slice spec lines): run `oracul:analyst` with the Step 4a
+   spec-delta prompt for this slice (docs only), then `B` with `stage: "green"` and `red: { exitCode: 0, output:
+   "resumed" }`. If it names `red-evidence`: run red-check again (Step 4.2), then `B` with `stage: "green"`.
    Result `BLOCKED` with `decision: "CONTINUE"` → tell the user (slice, FRs not delivered, failure note path), continue.
    Result `BLOCKED` with `decision: "STOP"` → stop the phase; report the failure note and the dependent slices; ask the user how to proceed.
 4. A slice BLOCKED with `failing: ["e2e: stack busy"]` was not a code failure: another stack operation held the lock

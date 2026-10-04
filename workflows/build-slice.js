@@ -189,6 +189,16 @@ let e2eFailures = '' // E2E FAILURES block of the last official run, forwarded u
 // Infrastructure failure (stack busy, guard refusal, runner without exit code, timeout): the gate never judged the
 // code, so the slice is neither triaged nor parked — it STOPS with its code kept, and "continue" resumes it.
 let stopped = null
+// The docs the close step checks (slice spec lines, red-evidence) are checked now, before any builder writes code:
+// found here a doc problem costs nothing; found at close it would cost the whole build.
+if (status === 'GREEN-PENDING') {
+  const start = await sh(node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage red`), `start checks ${S}`, { gate: true })
+  if (start.exitCode !== 0) {
+    const why = infraReason(start) || (start.output.split('\n').map((l) => l.trim()).find((l) => /^(INVALID|MISSING)\b/.test(l)) || `exit ${start.exitCode}`)
+    await note('Start check failed', `- ${why}\n- No builder ran; nothing to park. Fix the named doc (02_specs → analyst Step 4a; red-evidence → red-check), then resume stage green.\n- Output:\n\n\`\`\`\n${start.output.slice(-1500)}\n\`\`\``)
+    return { status: 'STOPPED', slice: S, rounds: 0, failing: [`start: ${why}`], output: start.output.slice(-1500) }
+  }
+}
 while (status === 'GREEN-PENDING' && rounds < MAX) {
   rounds++
   await sh(node('bin/state.mjs', 'round +1'), `round ${rounds}`)
