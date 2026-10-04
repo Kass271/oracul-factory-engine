@@ -14,6 +14,7 @@ import { relatedTests } from '../checks/lib/related.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
+import { imageInputsHash } from '../checks/lib/hash.mjs';
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
 const SPEC = 'docs/phase-01_mvp/02_specs/rooms.md';
@@ -663,6 +664,23 @@ test('e2e fresh green: docs or a backend test changed after the full run (not in
 test('e2e fresh red: the last full run failed', 1, (sb) => { officialRun(sb, 1); return node(sb, 'checks/check-e2e-fresh.mjs'); });
 test('e2e fresh red: no full run recorded', 1, (sb) => node(sb, 'checks/check-e2e-fresh.mjs'));
 test('e2e fresh green: no record + --allow-missing (app built before the record) → WARN', 0, (sb) => node(sb, 'checks/check-e2e-fresh.mjs', ['--allow-missing']), (sb, r) => /WARN/.test(r.out) || r.out);
+
+// ---------------- Docker rebuild only when image inputs changed (A9)
+const STACKHASH = (sb) => path.join(sb.stateDir, 'apps/fixture/stack-hash.json');
+const builtNow = (sb) => write(STACKHASH(sb), JSON.stringify({ hash: imageInputsHash(sb.appDir), at: new Date().toISOString() }));
+const upPlan = (sb) => node(sb, 'bin/stack.mjs', ['up', '--dry-run']);
+test('rebuild red: no record of the built images → --build', 0, (sb) => upPlan(sb), (sb, r) => /up -d --build \(no record of the built images\)/.test(r.out) || r.out);
+test('rebuild green: same image inputs → no rebuild', 0, (sb) => { builtNow(sb); return upPlan(sb); }, (sb, r) => (/up -d \(images current — no rebuild\)/.test(r.out) && !/--build/.test(r.out)) || r.out);
+test('rebuild red: production code changed → --build', 0, (sb) => { builtNow(sb); sb.put('backend/src/main/java/com/oracul/app/New.java', 'class New {}'); return upPlan(sb); },
+  (sb, r) => /--build \(image inputs changed\)/.test(r.out) || r.out);
+test('rebuild green: only tests, specs and docs changed → no rebuild', 0, (sb) => {
+  builtNow(sb);
+  sb.put('backend/src/test/java/com/oracul/app/X.java', 'class X {}'); sb.put('frontend/src/app/x.spec.ts', '//'); sb.put('e2e/tests/x.spec.ts', '//'); sb.put('docs/n.md', 'x');
+  return upPlan(sb);
+}, (sb, r) => /images current — no rebuild/.test(r.out) || r.out);
+test('rebuild red: an unknown new file at the app root counts (fail-safe) → --build', 0, (sb) => { builtNow(sb); sb.put('nginx-extra.conf', 'x'); return upPlan(sb); },
+  (sb, r) => /--build \(image inputs changed\)/.test(r.out) || r.out);
+test('rebuild green: --build forces a rebuild', 0, (sb) => { builtNow(sb); return node(sb, 'bin/stack.mjs', ['up', '--dry-run', '--build']); }, (sb, r) => /--build \(--build given\)/.test(r.out) || r.out);
 
 // lock library (async)
 const asyncTests = [];

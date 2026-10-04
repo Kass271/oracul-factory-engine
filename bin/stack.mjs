@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Docker stack of the active app. up, down and e2e hold the stack lock (checks/lib/lock.mjs): one stack operation at
 // a time; a second one waits --lock-wait seconds, then exits 3 "STACK BUSY". Never delete a live lock.
-//   up      docker compose up -d --build, then wait until backend health and frontend answer
+//   up      docker compose up -d --build, then wait until backend health and frontend answer. The build is skipped when
+//           the image inputs (checks/lib/hash.mjs) equal those of the last successful up (stack-hash.json); --build forces it
 //   down    docker compose down
 //   status  docker compose ps (no lock)
 //   e2e     up (unless --no-up) + Playwright; screenshots → docs/<phase>/05_release/qa/screenshots;
@@ -27,9 +28,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
+import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackHashPath, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
 import { FOCUS, SCRATCH, e2eEnv, e2eFocus, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
-import { e2eInputsHash } from '../checks/lib/hash.mjs';
+import { e2eInputsHash, imageInputsHash } from '../checks/lib/hash.mjs';
 import { acquire, alive } from '../checks/lib/lock.mjs';
 
 const args = parseArgs();
@@ -62,15 +63,25 @@ async function waitUp(timeoutS = 300) {
   return false;
 }
 
+// Rebuild only when something that goes into the images changed since the last successful up.
+function buildPlan() {
+  const hash = imageInputsHash(ctx.appDir);
+  const prev = readJson(stackHashPath(appName));
+  const why = args.build ? '--build given' : !prev ? 'no record of the built images' : prev.hash !== hash ? 'image inputs changed' : null;
+  return { hash, build: !!why, why: why || 'images current — no rebuild' };
+}
+
 async function up() {
   const t0 = Date.now();
-  console.log('docker compose up -d --build …');
-  compose('up', '-d', '--build');
+  const plan = buildPlan();
+  console.log(`docker compose up -d${plan.build ? ' --build' : ''} … (${plan.why})`);
+  compose('up', '-d', ...(plan.build ? ['--build'] : []));
   if (!(await waitUp())) {
     console.error('stack did not become healthy within 300s');
     console.error(tail(run('docker', ['compose', 'logs', '--tail', '60'], { cwd: ctx.appDir }).out, 80));
     process.exit(1);
   }
+  writeJson(stackHashPath(appName), { hash: plan.hash, at: new Date().toISOString() });
   console.log(`UP  frontend ${URLS.frontend}  ·  backend http://localhost:8080/api  ·  health ${URLS.backend}  (took ${took(Date.now() - t0)})`);
 }
 
@@ -137,7 +148,12 @@ async function waitRun(maxS) {
 }
 
 switch (cmd) {
-  case 'up': await locked('up'); if (!args['dry-run']) await up(); break;
+  case 'up': {
+    const l = await locked('up');
+    if (args['dry-run']) { const p = buildPlan(); console.log(`DRY RUN (lock held): docker compose up -d${p.build ? ' --build' : ''} (${p.why})`); l.release(); process.exit(0); }
+    await up();
+    break;
+  }
   case 'down': await locked('down'); if (!args['dry-run']) { compose('down'); console.log('down'); } break;
   case 'status': console.log(compose('ps')); break;
   case 'e2e-wait': await waitRun(args.max !== undefined ? Number(args.max) : 480); break;
