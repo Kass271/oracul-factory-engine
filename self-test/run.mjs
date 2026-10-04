@@ -570,9 +570,23 @@ test('failure block red: passing report has no block', 1, (sb) => {
   return { code: b ? 0 : 1, out: b };
 });
 test('failure block green: 12 failures fit the 80-line runner window', 0, () => {
-  const many = { suites: [{ file: 'a.spec.ts', specs: Array.from({ length: 12 }, (_, i) => ({ title: `t${i}`, file: 'a.spec.ts', tests: [{ status: 'unexpected', results: [{ error: { message: Array.from({ length: 30 }, (_, j) => `line ${j}`).join('\n') } }] }] })) }] };
+  const many = { suites: [{ file: 'a.spec.ts', specs: Array.from({ length: 12 }, (_, i) => ({ title: `t${i}`, file: 'a.spec.ts', tests: [{ status: 'unexpected', results: [{ error: { message: Array.from({ length: 30 }, (_, j) => `t${i} line ${j}`).join('\n') } }] }] })) }] }; // distinct errors (identical ones are grouped)
   const lines = failureBlock(many, '/app').split('\n');
   return { code: lines.length <= 70 && lines.some((l) => /2 more failure/.test(l)) ? 0 : 1, out: `${lines.length} lines` };
+});
+
+const pwFail = (file, title, message) => ({ title, file, tests: [{ status: 'unexpected', projectName: 'chromium', results: [{ error: { message } }] }] });
+test('failure block green: 12 identical failures + 1 different → 2 groups, each test still named', 0, () => {
+  const same = "Error: expect(locator).toHaveText(expected) failed\nLocator:  getByTestId('chatgpt-status')\nExpected: \"ChatGPT connected\"";
+  const rep = { suites: [{ file: 'a.spec.ts', specs: [...Array.from({ length: 12 }, (_, i) => pwFail(`s${i}.spec.ts`, `t${i}`, same)), pwFail('m.spec.ts', '360 px is mobile', 'Expected: <= 360\nReceived: 371')] }] };
+  const b = failureBlock(rep, '/app');
+  const ok = /E2E FAILURES \(13 in 2 groups\)/.test(b) && /✘ 12 tests, same error:/.test(b) && /· s0\.spec\.ts › t0/.test(b) && /… 6 more/.test(b)
+    && (b.match(/chatgpt-status/g) || []).length === 1 && /✘ m\.spec\.ts › 360 px is mobile/.test(b) && b.split('\n').length <= 70;
+  return { code: ok ? 0 : 1, out: b };
+});
+test('failure block red: different errors are not merged', 1, () => {
+  const rep = { suites: [{ file: 'a.spec.ts', specs: [pwFail('a.spec.ts', 'one', 'Error: A'), pwFail('b.spec.ts', 'two', 'Error: B')] }] };
+  return { code: /same error/.test(failureBlock(rep, '/app')) ? 0 : 1, out: '' };
 });
 
 // detached official E2E (stack.mjs e2e --detach / e2e-wait) with a fake Playwright — no Docker

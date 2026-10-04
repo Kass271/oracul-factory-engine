@@ -84,20 +84,34 @@ export function failedTests(report) {
 }
 
 // Block printed last by `stack.mjs e2e` on failure; sized to fit the last 80 lines the workflow runner returns.
+// Failures with the same first error lines are one group ("✘ 12 tests: …"): one cause, not twelve problems.
 export function failureBlock(report, appDir, { maxFailures = 10, budget = 60 } = {}) {
   const fails = failedTests(report);
   if (!fails.length) return '';
-  const shown = fails.slice(0, maxFailures);
-  const perErr = Math.max(3, Math.min(15, Math.floor(budget / shown.length) - 3));
   const rel = (p) => (path.isAbsolute(p) && appDir ? path.relative(appDir, p) : p);
-  const lines = [`==== E2E FAILURES (${fails.length}) ====`];
-  for (const f of shown) {
-    lines.push(`✘ ${f.file} › ${f.title}`);
+  const groups = new Map();
+  for (const f of fails) {
+    const key = f.error.slice(0, 3).join('\n');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  const list = [...groups.values()];
+  const shown = list.slice(0, maxFailures);
+  const perErr = Math.max(3, Math.min(15, Math.floor(budget / shown.length) - 3));
+  const lines = [`==== E2E FAILURES (${fails.length}${list.length < fails.length ? ` in ${list.length} group${list.length > 1 ? 's' : ''}` : ''}) ====`];
+  for (const g of shown) {
+    const f = g[0];
+    if (g.length === 1) lines.push(`✘ ${f.file} › ${f.title}`);
+    else {
+      lines.push(`✘ ${g.length} tests, same error:`);
+      for (const t of g.slice(0, 6)) lines.push(`    · ${t.file} › ${t.title}`);
+      if (g.length > 6) lines.push(`    · … ${g.length - 6} more`);
+    }
     lines.push(...f.error.slice(0, perErr).map((l) => `    ${l}`));
     for (const a of f.attachments) lines.push(`    attachment: ${rel(a)}`);
   }
-  if (fails.length > shown.length) lines.push(`… ${fails.length - shown.length} more failure(s) in the JSON report`);
+  const hidden = list.slice(shown.length).reduce((n, g) => n + g.length, 0);
+  if (hidden) lines.push(`… ${hidden} more failure(s) in the JSON report`);
   lines.push('==== END E2E FAILURES ====');
   return lines.join('\n');
 }
-
