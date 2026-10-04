@@ -2,7 +2,7 @@
 // Pure over its inputs (layer outputs, JUnit XML reports, the changed-file list) so the self-test can drive it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { exists, readText, tail, today } from './core.mjs';
+import { exists, readJson, readText, tail, today, writeJson } from './core.mjs';
 import { collectTraces, parsePlan, parseSpecFrs } from './docs.mjs';
 
 const COMPILE = {
@@ -45,6 +45,44 @@ export function junitFailures(dir, since = 0) {
   return out;
 }
 
+// Every attempt of every test case in Gradle's JUnit XML reports written at or after `since` (ms). With the test-retry
+// plugin a retried test appears once per attempt. → Map "class#name" → { classname, name, file, attempts: [{ ok }] }
+export function junitCases(dir, since = 0) {
+  const cases = new Map();
+  if (!exists(dir)) return cases;
+  for (const f of fs.readdirSync(dir).filter((x) => /^TEST-.*\.xml$/.test(x))) {
+    const p = path.join(dir, f);
+    if (fs.statSync(p).mtimeMs < since) continue;
+    for (const m of (readText(p) || '').matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
+      const attr = (k) => decode((m[1].match(new RegExp(`\\b${k}="([^"]*)"`)) || [])[1] || '');
+      const body = m[2] || '';
+      if (/<skipped\b/.test(body)) continue;
+      const key = `${attr('classname')}#${attr('name')}`;
+      if (!cases.has(key)) cases.set(key, { classname: attr('classname'), name: attr('name'), file: javaTestFile(attr('classname')), attempts: [] });
+      cases.get(key).attempts.push({ ok: !/<(failure|error)\b/.test(body) });
+    }
+  }
+  return cases;
+}
+// Tests that failed and then passed on a retry (flaky), as "Class.name".
+export const flakyCases = (cases) => [...cases.values()].filter((c) => c.attempts.some((a) => a.ok) && c.attempts.some((a) => !a.ok));
+
+// state/apps/<app>/flaky.json: { tests: { "Class.name": { count, firstSeen, lastSeen, slices: [] } } }. Informational
+// (D8: flaky tests never block); a test seen in 2+ slices is "persistent".
+export function recordFlaky(file, slice, names) {
+  const j = readJson(file, { tests: {} });
+  j.tests ||= {};
+  const now = new Date().toISOString();
+  for (const n of names) {
+    const t = j.tests[n] || { count: 0, firstSeen: now, slices: [] };
+    t.count++; t.lastSeen = now;
+    if (slice && !t.slices.includes(slice)) t.slices.push(slice);
+    j.tests[n] = t;
+  }
+  try { writeJson(file, j); } catch { /* informational */ }
+  return j;
+}
+
 export function testBugReason(text) {
   for (const [re, why] of TEST_BUGS) if (re.test(text)) return why;
   for (const m of text.matchAll(SAME_VALUE)) if (m[1] === m[2]) return `expected and actual both print "${m[1]}" — type mismatch (e.g. int vs long), can never pass`;
@@ -71,6 +109,7 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
   const sliceTests = s.frs.flatMap((f) => (traces.get(f) || []).map((t) => ({ ...t, fr: f })));
   const notRed = [];
   const wrong = [];
+  const flaky = [];
 
   for (const f of s.frs.filter((x) => !traces.get(x))) notRed.push(`${f}: no test tagged "@trace ${f}"`);
 
@@ -102,8 +141,19 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
       cls = 'FAIL (assertions / missing behaviour)';
       const bugs = [];
       if (layer === 'backend') {
-        for (const f of junitFailures(reportsDir || path.join(appDir, 'backend/build/test-results/test'), since)) {
+        const dir = reportsDir || path.join(appDir, 'backend/build/test-results/test');
+        const flakyKeys = new Set(flakyCases(junitCases(dir, since)).map((c) => `${c.classname}#${c.name}`));
+        const seen = new Set();
+        for (const f of junitFailures(dir, since)) {
           const file = javaTestFile(f.classname);
+          const key = `${f.classname}#${f.name}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (flakyKeys.has(key)) { // failed, then passed on retry
+            if (expected.has(file)) bugs.push(`${f.classname}.${f.name}: flaky new test — it failed, then passed on retry; new and updated tests must be deterministic`);
+            else flaky.push(`${f.classname}.${f.name}`);
+            continue;
+          }
           const why = testBugReason(f.text);
           if (why) bugs.push(`${f.classname}.${f.name}: ${why}`);
           else if (!expected.has(file) && exists(path.join(appDir, file))) bugs.push(`${f.classname}.${f.name}: an older test fails although no production code changed — the new tests leak state into it (shared rows, static counters, request logs, unfinished async work) or it must be updated under "Changes earlier behaviour"`);
@@ -122,7 +172,7 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
   if (!testLayers.length && !notRed.length) notRed.push('no unit/integration test layer tagged for the slice');
 
   const verdict = notRed.length ? 'NOT-RED' : wrong.length ? 'WRONG-REASON' : 'RED';
-  return { verdict, layers: out, notRed, wrong, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
+  return { verdict, layers: out, notRed, wrong, flaky, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
 }
 
 // red-evidence.md. "Scope:" is an additive line (a file without it was a full run).

@@ -227,6 +227,9 @@ const fin = await sh([
 ].join(' && '), 'final verify (quick)', { gate: true })
 if (fin.exitCode !== 0) { report.status = 'RED'; report.problems.push('final verify') }
 await sh(node('bin/commit.mjs', `--message "${A.phase} 05_release: ${report.status}${report.problems.length ? ` (${report.problems.join(', ')})` : ''}"`), 'commit release')
+// Flaky tests (passed only on retry) are reported, never blocking (D8).
+const fl = await sh(node('bin/state.mjs', 'flaky'), 'flaky tests')
+const flaky = String(fl.output || '').split('\n').filter((l) => /FLAKY /.test(l))
 
 return {
   ...report,
@@ -234,4 +237,5 @@ return {
   traceability: trace.output.slice(-600),
   artifacts: art.output.slice(-2000),
   e2e: e2e.output.slice(-1200),
+  flaky,
 }

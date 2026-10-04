@@ -6,7 +6,8 @@
 // Writes state/apps/<app>/last-run.json and state.lastVerify. Exit 0 = GREEN, 1 = RED.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, STEPS, context, lastRunPath, loadState, parseArgs, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
+import { ENGINE, STEPS, context, flakyPath, lastRunPath, loadState, parseArgs, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
+import { flakyCases, junitCases, recordFlaky } from './lib/red.mjs';
 import { slowReport } from './lib/timing.mjs';
 
 const args = parseArgs();
@@ -57,8 +58,13 @@ if (!args.quick) {
   layer('backend', path.join(ctx.appDir, 'backend'), './gradlew', ['test', 'jacocoTestReport', '--console=plain', '-q']);
   layer('frontend', path.join(ctx.appDir, 'frontend'), 'npm', ['run', 'test:ci', '--silent']);
   writeJson(lastRunPath(ctx.app || 'fixture'), { at: new Date().toISOString(), layers });
-  const slow = slowReport(path.join(ctx.appDir, 'backend/build/test-results/test'));
+  const xmlDir = path.join(ctx.appDir, 'backend/build/test-results/test');
+  const slow = slowReport(xmlDir);
   if (slow) console.log(`\n${slow}`);
+  // Tests that failed and passed on the retry (Gradle test-retry plugin): reported and recorded, never blocking (D8).
+  const flaky = flakyCases(junitCases(xmlDir, T0)).map((c) => `${c.classname}.${c.name}`);
+  for (const f of flaky) console.log(`FLAKY    ${f} (failed, then passed on retry — recorded, not blocking)`);
+  if (flaky.length && ctx.app) recordFlaky(flakyPath(ctx.app), ctx.state?.slice || ctx.state?.step || null, flaky);
 }
 
 function check(name, extra = []) {

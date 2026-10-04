@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { context, exists, lastRunPath, listPhases, parseArgs, readJson, readText, today } from './lib/core.mjs';
 import { allRequirements, collectTraces, frsOf, parsePlan, parseSpecs } from './lib/docs.mjs';
+import { junitCases } from './lib/red.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -16,14 +17,19 @@ const at = (p) => path.join(ctx.appDir, p);
 const results = new Map(); // rel -> 'pass' | 'fail'
 const set = (rel, ok) => { if (results.get(rel) !== 'fail') results.set(rel, ok ? 'pass' : 'fail'); };
 
+// Per test case: a test passes when one of its attempts passed (a retry that passed = flaky, like Playwright's
+// "flaky" status). A class with no executed test case does not count as passing.
 const junitDir = at('backend/build/test-results/test');
+for (const c of junitCases(junitDir).values()) set(c.file, c.attempts.some((a) => a.ok));
+// Fail-safe: a suite whose header counts failures but whose cases show no failed attempt is inconsistent → fail.
 if (exists(junitDir)) {
   for (const f of fs.readdirSync(junitDir).filter((x) => x.endsWith('.xml'))) {
-    const xml = readText(path.join(junitDir, f));
+    const xml = readText(path.join(junitDir, f)) || '';
     const m = xml.match(/<testsuite[^>]*name="([^"]+)"[^>]*tests="(\d+)"[^>]*failures="(\d+)"[^>]*errors="(\d+)"/);
     if (!m) continue;
     const rel = `backend/src/test/java/${m[1].replace(/\$.*$/, '').replace(/\./g, '/')}.java`;
-    set(rel, Number(m[2]) > 0 && m[3] === '0' && m[4] === '0');
+    if (Number(m[2]) === 0) set(rel, false);
+    else if ((m[3] !== '0' || m[4] !== '0') && !/<(failure|error)\b/.test(xml)) set(rel, false);
   }
 }
 

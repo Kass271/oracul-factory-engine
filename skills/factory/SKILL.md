@@ -129,5 +129,6 @@ Running:  http://localhost:4200  ·  API http://localhost:8080/api   (stop: node
 FRs:      <n> ✔ · <n> ✘ · <n> BLOCKED     (apps/<app>/docs/<phase>/05_release/qa/traceability.md)
 Slices:   01_x DONE · 02_y BLOCKED (failure-note) · …
 QA pack:  test-plan.md · acceptance-report.md · how-to-run.md · screenshots/
+Flaky:    <none | tests from `node $E/bin/state.mjs flaky` — passed only on retry, PERSISTENT first; never blocking>
 Problems: <none | list>
 ```

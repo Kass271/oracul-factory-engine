@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ENGINE } from '../checks/lib/core.mjs';
-import { analyseRed, renderEvidence } from '../checks/lib/red.mjs';
+import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
 import { relatedTests } from '../checks/lib/related.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
@@ -188,6 +188,7 @@ const red = (sb, opts = {}) => {
   const a = analyseRed({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', layers: { backend: { code: 1, out: 'BUILD FAILED' } }, changed: [], ...opts });
   return { code: a.verdict === 'RED' ? 0 : a.verdict === 'WRONG-REASON' ? 2 : 1, out: [a.verdict, ...a.notRed, ...a.wrong].join('\n') };
 };
+const lastRunOkAt = (sb) => sb.put('../../state/apps/fixture/last-run.json', JSON.stringify({ layers: { backend: { exit: 0 }, frontend: { exit: 0 } } }));
 const oldTest = (sb) => { sb.put(OLD, 'package com.oracul.app.old;\nclass OldIT { @org.junit.jupiter.api.Test void t() {} }\n'); junit(sb, 'com.oracul.app.old.OldIT', ASSERT); };
 test('red green: slice test fails on an assertion', 0, (sb) => { roomsFails(sb); return red(sb); });
 test('red red: all tests pass', 1, (sb) => red(sb, { layers: { backend: { code: 0, out: 'BUILD SUCCESSFUL' } } }));
@@ -232,6 +233,44 @@ test('red green: range covered by a parameterized test', 0, (sb) => {
   sb.edit(SPEC, '- Ranges & invariants: none', '- Ranges & invariants: capacity 1..500 accepted, 0 and 501 → VALIDATION_FAILED');
   sb.edit('backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java', '@org.junit.jupiter.api.Test', '@org.junit.jupiter.params.ParameterizedTest @org.junit.jupiter.params.provider.ValueSource(ints = {1, 500})');
   return red(sb);
+});
+// FLAKY (A3): the Gradle test-retry plugin writes one <testcase> per attempt
+const attempts = (sb, cls, ...oks) => sb.put(`backend/build/test-results/test/TEST-${cls}.xml`,
+  `<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="${cls}" tests="${oks.length}" failures="${oks.filter((o) => !o).length}" errors="0">\n${oks.map((ok) => `  <testcase name="t()" classname="${cls}" time="0.1">${ok ? '' : ASSERT}</testcase>`).join('\n')}\n</testsuite>\n`);
+const oldFile = (sb) => sb.put(OLD, 'package com.oracul.app.old;\nclass OldIT { @org.junit.jupiter.api.Test void t() {} }\n');
+test('flaky green: an older test that failed, then passed on retry is FLAKY, not blamed on the slice', 0, (sb) => {
+  roomsFails(sb); oldFile(sb); attempts(sb, 'com.oracul.app.old.OldIT', false, true);
+  const a = analyseRed({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', layers: { backend: { code: 1, out: 'BUILD FAILED' } }, changed: [] });
+  return { code: a.verdict === 'RED' && a.flaky.join() === 'com.oracul.app.old.OldIT.t()' ? 0 : 1, out: JSON.stringify(a.wrong) };
+});
+test('flaky red: a slice test that passed on retry is WRONG-REASON (new tests must be deterministic)', 2, (sb) => {
+  oldFile(sb); junit(sb, 'com.oracul.app.old.OldIT', ASSERT);
+  attempts(sb, 'com.oracul.app.rooms.RoomsApiIT', false, true);
+  return red(sb, { changed: [OLD] });
+}, (sb, r) => /flaky new test/.test(r.out) || r.out);
+test('flaky red: an older test that fails on every attempt is still blamed (leak)', 2, (sb) => { roomsFails(sb); oldFile(sb); attempts(sb, 'com.oracul.app.old.OldIT', false, false); return red(sb); },
+  (sb, r) => /older test fails/.test(r.out) || r.out);
+test('flaky green: verify reports FLAKY and records it in flaky.json', 1, (sb) => {
+  attempts(sb, 'com.oracul.app.rooms.RoomsApiIT', false, true);
+  const later = new Date(Date.now() + 3_600_000);
+  fs.utimesSync(sb.p('backend/build/test-results/test/TEST-com.oracul.app.rooms.RoomsApiIT.xml'), later, later);
+  return node(sb, 'checks/verify.mjs');
+}, (sb, r) => {
+  const j = JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/flaky.json'), 'utf8'));
+  return (/FLAKY\s+com\.oracul\.app\.rooms\.RoomsApiIT\.t\(\)/.test(r.out) && j.tests['com.oracul.app.rooms.RoomsApiIT.t()']?.count === 1) || r.out;
+});
+test('flaky green: a test flaky in two slices is PERSISTENT', 0, (sb) => {
+  const f = path.join(sb.stateDir, 'apps/fixture/flaky.json');
+  recordFlaky(f, '01_rooms', ['a.B.t()']); recordFlaky(f, '02_search', ['a.B.t()']); recordFlaky(f, '02_search', ['c.D.u()']);
+  return node(sb, 'bin/state.mjs', ['flaky']);
+}, (sb, r) => (/PERSISTENT FLAKY a\.B\.t\(\) — seen 2×/.test(r.out) && /^FLAKY c\.D\.u\(\)/m.test(r.out)) || r.out);
+test('flaky green: traceability counts a test that passed on retry as passing', 0, (sb) => {
+  lastRunOkAt(sb); attempts(sb, 'com.oracul.app.rooms.RoomsApiIT', false, true);
+  return node(sb, 'checks/gen-traceability.mjs');
+});
+test('flaky red: traceability fails a test that failed on every attempt', 1, (sb) => {
+  lastRunOkAt(sb); attempts(sb, 'com.oracul.app.rooms.RoomsApiIT', false, false);
+  return node(sb, 'checks/gen-traceability.mjs');
 });
 const fe = (sb, out, opts = {}) => red(sb, { slice: '02_search', layers: { frontend: { code: 1, out } }, ...opts });
 test('red green: frontend slice spec fails', 0, (sb) => fe(sb, ' FAIL  src/app/search/search.spec.ts > search > filters\nAssertionError: expected [] to have length 1'));
