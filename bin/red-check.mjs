@@ -16,6 +16,7 @@ import { context, flakyPath, parseArgs, run, took } from '../checks/lib/core.mjs
 import { collectTraces, parsePlan } from '../checks/lib/docs.mjs';
 import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
 import { layerCommand, relatedTests } from '../checks/lib/related.mjs';
+import { compileSteps, diagnostics, runCompile } from '../checks/lib/compile.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -37,20 +38,30 @@ const plans = Object.fromEntries(testLayers.map((layer) => [layer, layerCommand(
 
 if (args['dry-run']) {
   console.log(`DRY RUN red-check ${slice} (scope ${scope})`);
+  if (plans.backend) console.log('  compile first: backend ./gradlew -q compileJava, then compileTestJava');
   for (const [layer, p] of Object.entries(plans)) console.log(`  ${layer}: ${p.cmd} ${p.args.join(' ')}${p.note ? `   # ${p.note}` : ''}`);
   process.exit(0);
 }
 
 const since = Date.now() - 1000;
 const layers = {};
-for (const [layer, p] of Object.entries(plans)) {
+// Compile the backend first (incremental — the test task reuses it): a compile error answers in seconds with the
+// compiler's own lines instead of after a full test run.
+let compile = null;
+if (plans.backend) {
+  const t0 = Date.now();
+  const c = runCompile(ctx.appDir, compileSteps(ctx.appDir, ['backend'], ['main', 'tests']));
+  console.log(`backend compile took ${took(Date.now() - t0)}`);
+  if (c.some((x) => x.code !== 0)) compile = diagnostics(ctx.appDir, c, changed || []);
+}
+for (const [layer, p] of Object.entries(compile ? {} : plans)) {
   const t0 = Date.now();
   if (p.note) console.log(`${layer}: ${p.note}`);
   layers[layer] = run(p.cmd, p.args, { cwd: path.join(ctx.appDir, layer), env: { ...process.env, CI: 'true' } });
   console.log(`${layer} tests (${p.scoped ? 'related' : 'whole layer'}) took ${took(Date.now() - t0)}`);
 }
 
-const a = analyseRed({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice, layers, since, changed });
+const a = analyseRed({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice, layers, since, changed, compile });
 if (a.flaky.length && ctx.app) recordFlaky(flakyPath(ctx.app), slice, a.flaky);
 const md = renderEvidence(a, { slice, frs: s.frs, scope });
 const out = path.join(ctx.phaseDir, '04_build', slice, 'red-evidence.md');

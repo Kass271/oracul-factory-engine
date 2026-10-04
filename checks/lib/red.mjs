@@ -4,6 +4,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { exists, readJson, readText, tail, today, writeJson } from './core.mjs';
 import { collectTraces, parsePlan, parseSpecFrs } from './docs.mjs';
+import { diagnostics } from './compile.mjs';
+
+// What a compile error means, by where it is (checks/lib/compile.mjs labels).
+const COMPILE_MEANS = {
+  main: 'production code does not compile (contract fallout?) — the contract sync step repairs it, never the tester',
+  generated: 'generated code does not compile — a contract problem for the analyst',
+  'test-new': 'a new or changed test does not compile — fix the test (use seams that exist before the code)',
+  'test-old': 'an older test no longer compiles — list it under "Changes earlier behaviour" and update it',
+  unknown: 'compile error (location not recognised — see the compiler output)',
+};
+export function compileProblems(layer, d) {
+  const out = [];
+  for (const [label, n] of Object.entries(d.labels)) {
+    if (!n) continue;
+    const where = d.files.filter((f) => f.label === label).slice(0, 3).map((f) => `${f.rel}:${f.line}`).join(', ');
+    out.push(`${layer}: compile error in ${label} (${n}) — ${COMPILE_MEANS[label]}${where ? `: ${where}` : ''}`);
+  }
+  return out.length ? out : [`${layer}: compile error — ${COMPILE_MEANS.unknown}`];
+}
 
 const COMPILE = {
   backend: /compile(Test)?Java FAILED|Compilation failed|error: cannot find symbol|error: package .* does not exist/,
@@ -101,7 +120,7 @@ export const javaTestFile = (classname) => `backend/src/test/java/${classname.re
 // input: { appDir, phaseDir, slice, layers: { backend?: {code, out}, frontend?: {code, out} },
 //          reportsDir?, since?, changed: [app-relative test files changed/added in the working tree] | null (unknown) }
 // returns: { verdict: RED | NOT-RED | WRONG-REASON, layers: [{layer, code, cls, out}], notRed: [..], wrong: [..], sliceTests }
-export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, since = 0, changed = null }) {
+export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, since = 0, changed = null, compile = null }) {
   const s = (parsePlan(phaseDir) || []).find((p) => p.slice === slice);
   if (!s) return { verdict: 'NOT-RED', layers: [], notRed: [`${slice} is not in the plan`], wrong: [], sliceTests: [] };
   const traces = collectTraces(appDir);
@@ -110,6 +129,9 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
   const notRed = [];
   const wrong = [];
   const flaky = [];
+  const compiler = []; // verbatim compiler lines for the evidence
+  // Compile first (red-check compiles the backend before running anything): a compile error is never valid RED.
+  if (compile && compile.count) { wrong.push(...compileProblems('backend', compile)); compiler.push(...compile.verbatim); }
 
   for (const f of s.frs.filter((x) => !traces.get(x))) notRed.push(`${f}: no test tagged "@trace ${f}"`);
 
@@ -136,7 +158,12 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
     if (!res) continue;
     let cls;
     if (res.code === 0) { cls = 'PASSED (tests do not fail — not red)'; notRed.push(`${layer}: all tests pass`); }
-    else if (COMPILE[layer].test(res.out)) { cls = 'COMPILE-ERROR (red for the wrong reason)'; wrong.push(`${layer}: compile error`); }
+    else if (COMPILE[layer].test(res.out)) {
+      cls = 'COMPILE-ERROR (red for the wrong reason)';
+      const d = diagnostics(appDir, [{ layer, stage: 'tests', code: res.code, out: res.out }], changed || []);
+      wrong.push(...compileProblems(layer, d));
+      compiler.push(...d.verbatim);
+    }
     else {
       cls = 'FAIL (assertions / missing behaviour)';
       const bugs = [];
@@ -172,7 +199,7 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
   if (!testLayers.length && !notRed.length) notRed.push('no unit/integration test layer tagged for the slice');
 
   const verdict = notRed.length ? 'NOT-RED' : wrong.length ? 'WRONG-REASON' : 'RED';
-  return { verdict, layers: out, notRed, wrong, flaky, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
+  return { verdict, layers: out, notRed, wrong, flaky, compiler, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
 }
 
 // red-evidence.md. "Scope:" is an additive line (a file without it was a full run).
@@ -189,6 +216,7 @@ export function renderEvidence(a, { slice, frs, scope = 'full' }) {
     ...(a.untagged || []).map((f) => `- ${f} → MISSING: no test tagged "@trace ${f}"`),
     '',
     ...(a.notRed.length || a.wrong.length ? ['## Problems', '', ...a.notRed.map((p) => `- NOT-RED: ${p}`), ...a.wrong.map((p) => `- WRONG-REASON: ${p}`), ''] : []),
+    ...(a.compiler?.length ? ['## Compiler errors', '', ...a.compiler.map((l) => `    ${l}`), ''] : []),
     ...(a.flaky?.length ? ['## Flaky older tests (passed on retry — not blamed on this slice)', '', ...a.flaky.map((f) => `- FLAKY: ${f}`), ''] : []),
     ...a.layers.map((l) => `## ${l.layer}\n\n- Command exit: ${l.code}\n- Classification: ${l.cls}\n\n\`\`\`\n${tail(l.out, 50)}\n\`\`\`\n`),
     `RESULT: ${a.verdict}`,

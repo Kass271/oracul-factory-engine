@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { ENGINE } from '../checks/lib/core.mjs';
 import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
 import { relatedTests } from '../checks/lib/related.mjs';
+import { diagnostics, summaryLine } from '../checks/lib/compile.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
@@ -343,6 +344,56 @@ test('evidence green: an old red-evidence.md without a Scope line still passes t
   sb.put(f, sb.read(f).replace(/^Scope:.*\n/m, ''));
   return node(sb, 'checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_rooms', '--stage', 'red']);
 });
+
+// ---------------- WP-F: compile first, compiler output verbatim, labelled by where the error is
+const JAVAC = (sb, rel, msg = 'cannot find symbol') => `${sb.p(rel)}:12: error: ${msg}\n    symbol:   class ProviderCode\n    location: class X`;
+const fakeCompile = (sb, map) => { sb.env.ORACUL_COMPILE_FAKE = JSON.stringify(map); };
+test('compile green: labels main / generated / test-new / test-old from the compiler paths', 0, (sb) => {
+  const out = [JAVAC(sb, 'backend/src/main/java/com/oracul/app/X.java'), JAVAC(sb, 'backend/build/generated/openapi/src/main/java/com/oracul/app/api/A.java'),
+    JAVAC(sb, 'backend/src/test/java/com/oracul/app/NewIT.java'), JAVAC(sb, OLD)].join('\n');
+  const d = diagnostics(sb.appDir, [{ layer: 'backend', stage: 'main', code: 1, out }], ['backend/src/test/java/com/oracul/app/NewIT.java']);
+  const ok = d.labels.main === 1 && d.labels.generated === 1 && d.labels['test-new'] === 1 && d.labels['test-old'] === 1 && d.verbatim.some((l) => /symbol:\s+class ProviderCode/.test(l));
+  return { code: ok ? 0 : 1, out: JSON.stringify(d.labels) };
+});
+test('compile green: tsc paths (relative to frontend/) are labelled too', 0, (sb) => {
+  const d = diagnostics(sb.appDir, [{ layer: 'frontend', stage: 'main', code: 2, out: "src/app/runs/run.ts(4,7): error TS2322: Type 'string' is not assignable to type 'Mode'.\nsrc/app/runs/run.spec.ts(9,1): error TS2304: Cannot find name 'x'." }], []);
+  return { code: d.labels.main === 1 && d.labels['test-old'] === 1 && d.files[0].rel === 'frontend/src/app/runs/run.ts' ? 0 : 1, out: JSON.stringify(d.files) };
+});
+test('compile green: an unrecognised compiler format still shows its output', 0, (sb) => {
+  const d = diagnostics(sb.appDir, [{ layer: 'backend', stage: 'main', code: 1, out: 'weird failure line\nFAILURE: Build failed with an exception.' }], []);
+  return { code: d.count === 1 && d.verbatim.some((l) => /weird failure line/.test(l)) && /format not recognised/.test(summaryLine(d)) ? 0 : 1, out: d.verbatim.join('|') };
+});
+test('compile-check red: production code does not compile → exit 1, labelled diagnostics', 1, (sb) => { fakeCompile(sb, { 'backend:main': { code: 1, out: JAVAC(sb, 'backend/src/main/java/com/oracul/app/X.java') } }); return node(sb, 'bin/compile-check.mjs', ['--layer', 'backend']); },
+  (sb, r) => (/FAIL\s+backend main/.test(r.out) && /SKIP\s+backend tests/.test(r.out) && /COMPILE ERRORS: 1 \(main 1\)/.test(r.out) && /X\.java:12: error: cannot find symbol/.test(r.out)) || r.out);
+test('compile-check green: everything compiles → exit 0', 0, (sb) => { fakeCompile(sb, {}); return node(sb, 'bin/compile-check.mjs'); }, (sb, r) => /COMPILE OK/.test(r.out) || r.out);
+test('compile-check red: an older test that no longer compiles and is not listed → UNLISTED', 1, (sb) => {
+  oldFile(sb); fakeCompile(sb, { 'backend:tests': { code: 1, out: JAVAC(sb, OLD) } });
+  return node(sb, 'bin/compile-check.mjs', ['--layer', 'backend', '--stage', 'tests', '--slice', '01_rooms', '--require-listed']);
+}, (sb, r) => new RegExp(`UNLISTED ${OLD}`).test(r.out) || r.out);
+test('compile-check green: the same older test listed under "Changes earlier behaviour" is not UNLISTED', 1, (sb) => {
+  oldFile(sb); fakeCompile(sb, { 'backend:tests': { code: 1, out: JAVAC(sb, OLD) } });
+  sb.edit(SPEC, '- Changes earlier behaviour: none', `- Changes earlier behaviour: field renamed (tests: ${OLD})`);
+  return node(sb, 'bin/compile-check.mjs', ['--layer', 'backend', '--stage', 'tests', '--slice', '01_rooms', '--require-listed']);
+}, (sb, r) => !/UNLISTED/.test(r.out) || r.out);
+const gitApp = (sb, msg = 'phase-01_mvp 00_setup: skeleton') => {
+  for (const a of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', msg]]) spawnSync('git', a, { cwd: sb.appDir });
+};
+test('compile-check green: contract unchanged since the last finished slice → nothing to check', 0, (sb) => { gitApp(sb); fakeCompile(sb, { 'backend:main': { code: 1, out: 'x' } }); return node(sb, 'bin/compile-check.mjs', ['--if-contract-changed']); },
+  (sb, r) => /unchanged since the last finished slice/.test(r.out) || r.out);
+test('compile-check red: contract changed since the last finished slice → it compiles (and fails here)', 1, (sb) => {
+  gitApp(sb); sb.edit('api/openapi.yaml', 'operationId: listRooms', 'operationId: listAllRooms');
+  fakeCompile(sb, { 'backend:main': { code: 1, out: JAVAC(sb, 'backend/src/main/java/com/oracul/app/X.java') } });
+  return node(sb, 'bin/compile-check.mjs', ['--if-contract-changed']);
+});
+test('red-check red: backend does not compile → WRONG-REASON at once, compiler lines in the evidence, no test run', 2, (sb) => {
+  fakeCompile(sb, { 'backend:main': { code: 1, out: JAVAC(sb, 'backend/src/main/java/com/oracul/app/X.java') } });
+  return node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'slice']);
+}, (sb, r) => {
+  const ev = sb.read('docs/phase-01_mvp/04_build/01_rooms/red-evidence.md');
+  return (/compile error in main \(1\) — production code does not compile/.test(r.out) && /## Compiler errors/.test(ev) && /X\.java:12: error: cannot find symbol/.test(ev) && !/tests \((related|whole layer)\) took/.test(r.out)) || r.out;
+});
+test('red green: Angular test build with a TS error in a new spec is labelled test-new', 2, (sb) => fe(sb, 'src/app/search/search.spec.ts:3:5 - error TS2304: Cannot find name \'SearchPage\'.', { changed: ['frontend/src/app/search/search.spec.ts'] }),
+  (sb, r) => /frontend: compile error in test-new \(1\) — a new or changed test does not compile/.test(r.out) || r.out);
 
 // ---------------- verify --reuse-if-fresh (slice close) — the fixture has no gradlew, so a FULL run fails with exit 1
 const lastRunFile = (sb) => path.join(sb.stateDir, 'apps/fixture/last-run.json');
