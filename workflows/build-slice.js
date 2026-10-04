@@ -333,7 +333,7 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
 
   await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${rounds}`)
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
-  const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. Verify and E2E are GREEN. Write ${sliceDir}/review-findings.json with "round": ${rounds}. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
+  const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. Verify and E2E are GREEN. Write ${sliceDir}/review-findings.json with "round": ${rounds}. If ${sliceDir}/red-evidence.md has a section "Red by startup only", check those tests under dimension "tests": each must assert real behaviour, not just that the context starts. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
   const c = await sh(node('checks/check-review.mjs', `--slice ${S}`), `check-review r${rounds}`, { gate: true })
   if (infraReason(c)) { stopped = { gate: 'review', reason: infraReason(c), output: c.output }; break }
   if (c.exitCode === 0) { status = 'DONE'; failing = []; break }

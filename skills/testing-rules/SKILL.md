@@ -123,7 +123,9 @@ No randomness: enumerate the values, so a failure is reproducible.
 Run `node <engine>/bin/red-check.mjs --slice <slice> --scope slice` yourself — at most 3 times. It runs only the
 related tests (the slice's tagged tests, the tests its spec supersedes, the test files you changed); the slice gate
 runs the whole suite later. It must print `RESULT: RED`. It flags as WRONG-REASON:
-compile errors, Mockito misuse, a Spring context or TestBed that does not start, `expected:<8> but was:<8>` (same text,
+compile errors, Mockito misuse, a Spring context or TestBed that does not start (exception: a context that fails because
+**production** code is missing, where the failing property/class is named in the slice spec, counts as RED — prefer an
+`ApplicationContextRunner` test that asserts `hasNotFailed()`, so it fails on an assertion), `expected:<8> but was:<8>` (same text,
 different type), and older untouched tests that now fail. Then read every failure message and ask, per test:
 "what is the smallest production change that makes this pass without touching the test?" If there is none, the test is
 broken. The usual test bugs:

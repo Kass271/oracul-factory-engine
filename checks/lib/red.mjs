@@ -58,6 +58,7 @@ export function junitFailures(dir, since = 0) {
       out.push({
         classname: attr(m[1], 'classname'), name: attr(m[1], 'name'), type: attr(head, 'type'),
         text: `${attr(head, 'type')}: ${attr(head, 'message')}\n${decode(fm[3] || '').split('\n').slice(0, 15).join('\n')}`,
+        full: `${attr(head, 'type')}: ${attr(head, 'message')}\n${decode(fm[3] || '')}`, // whole trace: the root cause is at the end
       });
     }
   }
@@ -102,6 +103,33 @@ export function recordFlaky(file, slice, names) {
   return j;
 }
 
+// A Spring context that does not start. Red for the RIGHT reason only when (1) the root cause is thrown by production
+// or generated code (or names a production type/property), (2) that name appears in the slice's spec, and (3) the test
+// belongs to the slice (the caller checks 3). Anything unclear stays a test bug.
+const CONTEXT_FAIL = /Failed to load ApplicationContext|UnsatisfiedDependencyException|NoSuchBeanDefinitionException|BeanCreationException|ApplicationContextException|BindValidationException|ConfigurationPropertiesBindException/;
+export function startupCause({ appDir, phaseDir, slice, text }) {
+  if (!CONTEXT_FAIL.test(text || '')) return null;
+  const lines = String(text).split('\n');
+  const causeAt = lines.map((l, i) => (/^\s*Caused by: /.test(l) ? i : -1)).filter((i) => i >= 0).at(-1) ?? 0;
+  const cause = lines[causeAt].replace(/^\s*Caused by:\s*/, '').trim();
+  const frame = lines.slice(causeAt + 1).map((l) => l.match(/^\s*at (com\.oracul\.app\.[\w.$]+)\.[\w$<>]+\(/)).find(Boolean);
+  const cls = frame ? frame[1].replace(/\$.*$/, '') : null;
+  const file = (dir) => cls && path.join(appDir, dir, `${cls.replace(/\./g, '/')}.java`);
+  const typeIn = (cause.match(/type '(com\.oracul\.app\.[\w.$]+)'/) || [])[1];
+  const prop = (cause.match(/properties under '([\w.-]+)'/) || cause.match(/property '([\w.-]+)'/) || [])[1];
+  let where = 'unclear';
+  if (cls && exists(file('backend/src/test/java'))) where = 'test';
+  else if (cls && exists(file('backend/src/main/java'))) where = 'production';
+  else if (typeIn && /\.api\./.test(typeIn)) where = 'production'; // a generated interface nobody implements yet
+  else if (prop && !cls) where = 'production';
+  const names = [prop, prop?.split('.').at(-1), prop?.split('.').at(-1)?.replace(/-(\w)/g, (_, c) => c.toUpperCase()), cls?.split('.').at(-1), typeIn?.split('.').at(-1)].filter(Boolean);
+  const s = (parsePlan(phaseDir) || []).find((p) => p.slice === slice);
+  const specs = parseSpecFrs(phaseDir);
+  const specText = [...new Set((s?.frs || []).map((f) => specs.get(f)?.file).filter(Boolean))].map((f) => readText(path.join(phaseDir, '02_specs', f)) || '').join('\n').toLowerCase();
+  const linked = names.find((n) => specText.includes(n.toLowerCase())) || null;
+  return { cause: cause.slice(0, 200), where, linked, ok: where === 'production' && !!linked };
+}
+
 export function testBugReason(text) {
   for (const [re, why] of TEST_BUGS) if (re.test(text)) return why;
   for (const m of text.matchAll(SAME_VALUE)) if (m[1] === m[2]) return `expected and actual both print "${m[1]}" — type mismatch (e.g. int vs long), can never pass`;
@@ -130,6 +158,7 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
   const wrong = [];
   const flaky = [];
   const compiler = []; // verbatim compiler lines for the evidence
+  const startup = []; // RED only because the Spring context does not start (production cause, linked to the spec)
   // Compile first (red-check compiles the backend before running anything): a compile error is never valid RED.
   if (compile && compile.count) { wrong.push(...compileProblems('backend', compile)); compiler.push(...compile.verbatim); }
 
@@ -181,6 +210,9 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
             else flaky.push(`${f.classname}.${f.name}`);
             continue;
           }
+          const sc = startupCause({ appDir, phaseDir, slice, text: f.full || f.text });
+          if (sc && sc.ok && expected.has(file)) { startup.push(`${f.classname}.${f.name}: the Spring context does not start because production code is missing (${sc.cause}; named in the spec as "${sc.linked}")`); continue; }
+          if (sc) { bugs.push(`${f.classname}.${f.name}: Spring test context does not start — ${sc.where === 'production' && !sc.linked ? 'the cause is in production code but not named in the slice spec' : sc.where === 'production' ? 'an older test (not the slice\'s)' : `test configuration bug (cause ${sc.where === 'test' ? 'thrown in test code' : 'unclear'})`}: ${sc.cause}`); continue; }
           const why = testBugReason(f.text);
           if (why) bugs.push(`${f.classname}.${f.name}: ${why}`);
           else if (!expected.has(file) && exists(path.join(appDir, file))) bugs.push(`${f.classname}.${f.name}: an older test fails — production code has not changed in RED, so either the new tests leak state into it (shared rows, static counters, request logs, unfinished async work) or the contract/generated code changed under it (fallout: list it under "Changes earlier behaviour" and update it)`);
@@ -199,7 +231,7 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
   if (!testLayers.length && !notRed.length) notRed.push('no unit/integration test layer tagged for the slice');
 
   const verdict = notRed.length ? 'NOT-RED' : wrong.length ? 'WRONG-REASON' : 'RED';
-  return { verdict, layers: out, notRed, wrong, flaky, compiler, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
+  return { verdict, layers: out, notRed, wrong, flaky, compiler, startup, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
 }
 
 // red-evidence.md. "Scope:" is an additive line (a file without it was a full run).
@@ -216,6 +248,7 @@ export function renderEvidence(a, { slice, frs, scope = 'full' }) {
     ...(a.untagged || []).map((f) => `- ${f} → MISSING: no test tagged "@trace ${f}"`),
     '',
     ...(a.notRed.length || a.wrong.length ? ['## Problems', '', ...a.notRed.map((p) => `- NOT-RED: ${p}`), ...a.wrong.map((p) => `- WRONG-REASON: ${p}`), ''] : []),
+    ...(a.startup?.length ? ['## Red by startup only (reviewer: check these tests — each fails only because the context does not start)', '', ...a.startup.map((x) => `- ${x}`), ''] : []),
     ...(a.compiler?.length ? ['## Compiler errors', '', ...a.compiler.map((l) => `    ${l}`), ''] : []),
     ...(a.flaky?.length ? ['## Flaky older tests (passed on retry — not blamed on this slice)', '', ...a.flaky.map((f) => `- FLAKY: ${f}`), ''] : []),
     ...a.layers.map((l) => `## ${l.layer}\n\n- Command exit: ${l.code}\n- Classification: ${l.cls}\n\n\`\`\`\n${tail(l.out, 50)}\n\`\`\`\n`),

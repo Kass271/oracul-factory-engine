@@ -291,6 +291,42 @@ test('flaky red: traceability fails a test that failed on every attempt', 1, (sb
   lastRunOkAt(sb); attempts(sb, 'com.oracul.app.rooms.RoomsApiIT', false, false);
   return node(sb, 'checks/gen-traceability.mjs');
 });
+// WP-H: a Spring context that does not start — RED only for a production cause named in the slice spec
+const ctxFail = (cause, frame) => `<error type="java.lang.IllegalStateException" message="Failed to load ApplicationContext for [WebMergedContextConfiguration]">java.lang.IllegalStateException: Failed to load ApplicationContext
+	at org.springframework.test.context.cache.DefaultCacheAwareContextLoaderDelegate.loadContext(X.java:1)
+Caused by: org.springframework.beans.factory.BeanCreationException: Error creating bean
+	at org.springframework.beans.Y.z(Y.java:1)
+Caused by: ${cause}
+${frame ? `	at ${frame}(F.java:12)\n` : ''}	at org.springframework.Z.z(Z.java:1)</error>`;
+const PROD_PROPS = 'backend/src/main/java/com/oracul/app/rooms/RoomsProperties.java';
+test('startup green: the context fails in production code named in the slice spec → RED (listed for the reviewer)', 0, (sb) => {
+  sb.put(PROD_PROPS, 'class RoomsProperties {}'); sb.edit(SPEC, '- Ranges & invariants: none', '- Ranges & invariants: none\n- Config: RoomsProperties.callbackUri accepts /callback');
+  roomsFails(sb, ctxFail('java.lang.IllegalArgumentException: callback URI must end with /auth/callback', 'com.oracul.app.rooms.RoomsProperties.validate'));
+  const a = analyseRed({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', layers: { backend: { code: 1, out: 'BUILD FAILED' } }, changed: [] });
+  const md = renderEvidence(a, { slice: '01_rooms', frs: ['FR-1'] });
+  return { code: a.verdict === 'RED' && a.startup.length === 1 && /## Red by startup only/.test(md) ? 0 : 1, out: JSON.stringify(a.wrong) };
+});
+test('startup green: a property binding failure named in the spec → RED', 0, (sb) => {
+  sb.edit(SPEC, '- Ranges & invariants: none', '- Ranges & invariants: none\n- Config: app.rooms.callback-uri');
+  roomsFails(sb, ctxFail("org.springframework.boot.context.properties.bind.BindException: Failed to bind properties under 'app.rooms.callback-uri' to java.net.URI"));
+  return red(sb);
+});
+test('startup red: the context fails in test configuration code → test bug', 2, (sb) => {
+  sb.edit(SPEC, '- Ranges & invariants: none', '- Ranges & invariants: none\n- Config: TestcontainersConfiguration');
+  sb.put('backend/src/test/java/com/oracul/app/TestcontainersConfiguration.java', 'class TestcontainersConfiguration {}');
+  roomsFails(sb, ctxFail('java.lang.IllegalStateException: no container', 'com.oracul.app.TestcontainersConfiguration.postgres'));
+  return red(sb);
+}, (sb, r) => /test configuration bug \(cause thrown in test code\)/.test(r.out) || r.out);
+test('startup red: a production cause the slice spec never names → test bug', 2, (sb) => {
+  sb.put(PROD_PROPS, 'class RoomsProperties {}');
+  roomsFails(sb, ctxFail('java.lang.IllegalArgumentException: bad', 'com.oracul.app.rooms.RoomsProperties.validate'));
+  return red(sb);
+}, (sb, r) => /not named in the slice spec/.test(r.out) || r.out);
+test('startup red: an older test whose context fails is not the slice\'s RED', 2, (sb) => {
+  sb.put(PROD_PROPS, 'class RoomsProperties {}'); sb.edit(SPEC, '- Ranges & invariants: none', '- Ranges & invariants: none\n- Config: RoomsProperties');
+  roomsFails(sb); oldFile(sb); junit(sb, 'com.oracul.app.old.OldIT', ctxFail('java.lang.IllegalArgumentException: bad', 'com.oracul.app.rooms.RoomsProperties.validate'));
+  return red(sb);
+}, (sb, r) => /an older test \(not the slice's\)/.test(r.out) || r.out);
 const fe = (sb, out, opts = {}) => red(sb, { slice: '02_search', layers: { frontend: { code: 1, out } }, ...opts });
 test('red green: frontend slice spec fails', 0, (sb) => fe(sb, ' FAIL  src/app/search/search.spec.ts > search > filters\nAssertionError: expected [] to have length 1'));
 test('red red: frontend older spec broken by the new tests', 2, (sb) => {
