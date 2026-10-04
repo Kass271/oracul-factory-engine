@@ -211,7 +211,7 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   if (work.code) {
     await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
     const task = rounds === 1 ? work.code : `Fix round ${rounds}. Fix exactly these problems:\n${work.code}`
-    const tail = `\n\nTests are locked for you. If you believe a test is wrong (contradicts the spec, broken, flaky), do not work around it — report it in testProblems; the tester fixes tests. ${NO_E2E}${e2eFailures ? `\n\n${e2eFailures}` : ''}`
+    const tail = `\n\nWhile you work, run only the slice's tests (backend: ./gradlew test --tests <classes from ${sliceDir}/red-evidence.md and your fix list>; frontend: npm run test:ci -- --include <those specs>); run your whole layer once before you finish. Tests are locked for you. If you believe a test is wrong (contradicts the spec, broken, flaky), do not work around it — report it in testProblems; the tester fixes tests. ${NO_E2E}${e2eFailures ? `\n\n${e2eFailures}` : ''}`
     const rs = await parallel([
       () => role('backend-builder', `${CTX}\n\nStep 4c — backend for ${S}. ${task}${tail}`, `backend: ${S} r${rounds}`, BUILDER_SCHEMA),
       () => role('frontend-builder', `${CTX}\n\nStep 4c — frontend for ${S}. ${task}${tail}`, `frontend: ${S} r${rounds}`, BUILDER_SCHEMA),

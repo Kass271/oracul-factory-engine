@@ -770,6 +770,17 @@ wf('workflow red: an unscoped tester self-check would be caught', 1, wfArgs({ st
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
   return /--scope slice/.test(tester.prompt.replace(/--scope slice/g, '')) ? 0 : 1;
 });
+wf('workflow green: builders loop on the slice tests and run their layer once', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
+  const be = calls.find((c) => c.opts.label === 'backend: 01_rooms r1');
+  const fe = calls.find((c) => c.opts.label === 'frontend: 01_rooms r1');
+  const rule = (p) => /run only the slice's tests/.test(p) && /--tests <classes from .*red-evidence\.md/.test(p) && /--include/.test(p) && /whole layer once/.test(p);
+  const md = ['backend-builder', 'frontend-builder'].every((a) => /\*\*once\*\*/.test(fs.readFileSync(path.join(ENGINE, 'agents', `${a}.md`), 'utf8')));
+  return be && fe && rule(be.prompt) && rule(fe.prompt) && md ? 0 : 1;
+});
+wf('workflow red: a builder prompt without the related-tests rule would be caught', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
+  const be = calls.find((c) => c.opts.label === 'backend: 01_rooms r1');
+  return /run only the slice's tests/.test(be.prompt.replace("run only the slice's tests", '')) ? 0 : 1;
+});
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
   const stripped = tester.prompt.replace(/red-check/g, 'xxx');

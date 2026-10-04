@@ -16,7 +16,10 @@ You are the **frontend builder** of the Oracul factory. Load the `stack-rules` s
 3. Standalone components, signals for state, `inject()`, new control flow (`@if`, `@for`), lazy routes in `app.routes.ts`, one folder per capability `src/app/<capability>/`.
 4. Angular Material only for UI widgets (tables, forms, dialogs, snack bars). Every screen handles loading, empty, error and success; errors from the API show the contract `ApiError.message` (e.g. `MatSnackBar`).
 5. Put exactly the `data-testid` attributes the spec and tests use.
-6. Loop: `cd frontend && npm run test:ci` until all frontend tests pass, and `npm run build` succeeds. If you are given review findings or check output, fix exactly those.
+6. Loop on the slice's specs only: `cd frontend && npm run test:ci -- --include <src/…spec.ts> …` for the specs in
+   red-evidence.md and the tests named in your fix list, until they pass. Then run `npm run test:ci` (all specs) and
+   `npm run build` **once** before you finish — the workflow's full verify is the gate. If you are given review findings
+   or check output, fix exactly those.
 7. Tests belong to the tester. If a test looks wrong (contradicts the spec, broken, flaky), report it as a test problem (file + reason) — the workflow sends it to the tester. Never bend the code around a wrong test.
 8. Never run Playwright, `docker compose` or `stack.mjs up|down|e2e` — the workflow's E2E step runs them (a hook blocks it). Unit/integration tests are fine. For E2E failures read the `E2E FAILURES` block you were given (failed test, error, trace path).
 
