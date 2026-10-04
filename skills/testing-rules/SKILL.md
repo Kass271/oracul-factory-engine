@@ -84,7 +84,7 @@ evidence), then the full suite. A slice closes only when the last full run passe
 (`check-e2e-fresh`).
 The official E2E run happens only in subStep `e2e` (hook-enforced, serialised by the stack lock). In a test-fix round the
 tester may verify an E2E repair with `stack.mjs e2e --scratch --grep <spec file>`; it writes `e2e/report-scratch/` and
-`e2e/test-results-scratch/` and is never evidence.
+`e2e/test-results-scratch/` and is never evidence. If `stack.mjs` refuses a run, report its reason and stop — never run Playwright or `docker compose` yourself (a hook blocks every form).
 
 ## When a later spec changes behaviour
 A spec line `Changes earlier behaviour: <old> → <new> (tests: <files>)` makes those tests outdated. The tester updates

@@ -6,10 +6,13 @@
 //   - subStep test-fix: production code and api/openapi.yaml (tester repairs tests in a fix round)
 //   - subStep green:  tests and api/openapi.yaml (builders never change tests or the contract)
 //   - subStep review: anything outside docs/ (reviewer only reports)
-//   - Bash in subSteps red/green/test-fix/review: running Playwright or changing the Docker stack (docker compose
-//     up/down/…, docker stop/rm/…, stack.mjs up/down/e2e). E2E runs only in the workflow's E2E step (subStep e2e),
-//     serialised by the stack lock; the one exception is the tester's scoped scratch run in test-fix:
-//     `stack.mjs e2e --scratch --grep <pattern>`. Reading/searching, unit tests and `stack.mjs status` stay allowed.
+//   - Bash, any subStep while an app is active: running Playwright directly (npx/pnpx/bunx, yarn/pnpm [exec],
+//     npm exec/x, node_modules/.bin, node …/cli.js, npm run/test in e2e/) or changing the Docker stack directly
+//     (docker compose up/down/…, docker stop/rm/…). E2E and the stack run only through stack.mjs (lock, evidence dirs).
+//   - Bash in subSteps red/green/test-fix/review: stack.mjs up/down/e2e too — E2E runs only in the workflow's E2E step
+//     (subStep e2e); the one exception is the tester's scoped scratch run in test-fix:
+//     `stack.mjs e2e --scratch --grep <pattern>`. Reading/searching, unit tests, `stack.mjs status`, `docker compose
+//     ps|logs` and installing packages stay allowed.
 import path from 'node:path';
 import { active, block, inside, isEngine, kind, readInput } from './lib.mjs';
 
@@ -39,7 +42,7 @@ if (tool === 'Bash') {
   const a = active();
   if (a) {
     const why = stackViolation(c, cwd, a.state.subStep);
-    if (why) block(`${why}: E2E and the Docker stack run only in the workflow's E2E step (subStep e2e). In a test-fix round the tester may verify a repair with: node <engine>/bin/stack.mjs e2e --scratch --grep <spec file>.`);
+    if (why) block(`${why}: E2E and the Docker stack run only through stack.mjs — the official E2E only in the workflow's E2E step (subStep e2e). In a test-fix round the tester may verify a repair with: node <engine>/bin/stack.mjs e2e --scratch --grep <spec file>. If stack.mjs refused a run, report its reason and stop — never run Playwright or docker compose yourself.`);
   }
   process.exit(0);
 }
@@ -60,19 +63,25 @@ function stackViolation(command, startDir, startSub) {
     if (c0 === 'cd') { dir = path.resolve(dir, tok[1] || '.'); continue; }
     const si = tok.findIndex((t) => /(^|\/)state\.mjs$/.test(t));
     if (si >= 0 && tok[si + 1] === 'set' && tok[si + 2] === 'subStep' && tok[si + 3]) { sub = tok[si + 3]; continue; }
-    if (!LOCKED_OUT.includes(sub)) continue;
-    const runner = ['npx', 'pnpx', 'bunx', 'yarn', 'pnpm'].includes(c0);
-    const pw = tok.findIndex((t) => /(^|\/)playwright$/.test(t));
-    if (pw >= 0 && (pw === 0 || runner) && ['test', 'install'].includes(tok[pw + 1])) return `\`${seg.trim()}\` runs Playwright`;
+    const locked = LOCKED_OUT.includes(sub);
+    // Playwright started directly — in every subStep (stack.mjs starts it as a child process, never as a tool call).
+    const pkgRunner = ['npx', 'pnpx', 'bunx', 'yarn', 'pnpm', 'node'].includes(c0) || (c0 === 'npm' && ['exec', 'x'].includes(c1));
+    const pw = tok.findIndex((t) => /(^|\/)playwright(@[\w.^~-]+)?$/.test(t) || /(^|\/)(@playwright\/test|playwright(-core)?)\/cli\.js$/.test(t));
+    if (pw >= 0 && (pw === 0 || pkgRunner)) {
+      const verb = tok.slice(pw + 1).find((t) => !t.startsWith('-'));
+      if (verb === 'test' || (verb === 'install' && locked)) return `\`${seg.trim()}\` runs Playwright`;
+    }
     const pi = tok.findIndex((t) => t === '--prefix' || t.startsWith('--prefix='));
     const prefix = pi < 0 ? null : tok[pi].includes('=') ? tok[pi].split('=')[1] : tok[pi + 1];
     const npmCmd = c0 === 'npm' && tok.slice(1).find((t, i) => !t.startsWith('-') && !(pi >= 0 && !tok[pi].includes('=') && i + 1 === pi + 1));
     if (c0 === 'npm' && ['run', 'run-script', 'test', 't', 'start', 'exec', 'x'].includes(npmCmd)) {
       if ((prefix && /(^|\/)e2e\/?$/.test(prefix)) || (!prefix && /(^|\/)e2e$/.test(dir))) return `\`${seg.trim()}\` runs the E2E package`;
     }
+    // The Docker stack changed directly — in every subStep (stack.mjs up/down hold the lock).
     const compose = c0 === 'docker-compose' ? tok.slice(1) : c0 === 'docker' && c1 === 'compose' ? tok.slice(2) : null;
     if (compose && compose.some((t) => ['up', 'down', 'build', 'restart', 'rm', 'stop', 'start', 'kill', 'create', 'run'].includes(t))) return `\`${seg.trim()}\` changes the Docker stack`;
     if (c0 === 'docker' && ['stop', 'rm', 'kill', 'restart', 'start', 'run'].includes(c1)) return `\`${seg.trim()}\` changes Docker containers`;
+    if (!locked) continue;
     const st = tok.findIndex((t) => /(^|\/)stack\.mjs$/.test(t));
     if (st >= 0) {
       const rest = tok.slice(st + 1);

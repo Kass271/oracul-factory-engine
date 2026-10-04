@@ -521,6 +521,27 @@ for (const [sub, cmd] of [
   ['green', `node "${path.join(ENGINE, 'bin/state.mjs')}" set subStep e2e && node "${STACK}" e2e`],
 ]) test(`guard green: ${sub} runs \`${cmd.replace(ENGINE, '<engine>').replace(ENGINE, '<engine>')}\``, 0, (sb) => bash(sb, sub, cmd));
 
+// A11: no improvised E2E — every way of starting Playwright directly, and direct stack changes, in every subStep
+const PW_FORMS = [
+  'npx playwright test', 'npx --yes playwright@1.50.0 test x.spec.ts', 'pnpx playwright test', 'bunx playwright test',
+  'yarn playwright test', 'pnpm exec playwright test', 'pnpm playwright test --grep FR-38', 'npm exec -- playwright test', 'npm x playwright test',
+  './node_modules/.bin/playwright test', 'cd apps/fixture/e2e && node_modules/.bin/playwright test --reporter=list --output=/tmp/x',
+  'node apps/fixture/e2e/node_modules/@playwright/test/cli.js test', 'node apps/fixture/e2e/node_modules/playwright/cli.js test --project=chromium',
+  'cd apps/fixture/e2e && npx playwright test --reporter=list --output=test-results-mine',
+];
+for (const sub of ['none', 'test-fix', 'green']) {
+  for (const cmd of PW_FORMS) test(`guard red: ${sub} runs Playwright directly — \`${cmd}\``, 2, (sb) => bash(sb, sub, cmd));
+  test(`guard red: ${sub} changes the stack directly — \`docker compose up -d\``, 2, (sb) => bash(sb, sub, 'docker compose up -d'));
+}
+for (const [sub, cmd] of [
+  ['none', 'yarn add -D playwright'], ['none', 'cd apps/fixture/e2e && npm install'], ['none', 'docker compose logs --tail 50'],
+  ['none', 'cat apps/fixture/e2e/playwright.config.ts'], ['none', 'npx playwright install chromium'], ['e2e', `node ${STACK} e2e --detach --focus-slice 01_rooms`],
+]) test(`guard green: ${sub} runs \`${cmd.replace(ENGINE, '<engine>')}\``, 0, (sb) => bash(sb, sub, cmd));
+test('guard green: the refusal tells the agent to report and stop, not to improvise', 2, (sb) => bash(sb, 'none', 'npx playwright test'),
+  (sb, r) => (/report its reason and stop/.test(r.out) && /never run Playwright or docker compose yourself/.test(r.out)) || r.out);
+test('stack green: a refused scratch run names the migration and forbids running Playwright yourself', 1, (sb) => node(sb, 'bin/stack.mjs', ['e2e', '--scratch', '--grep', 'rooms.spec.ts', '--dry-run']),
+  (sb, r) => (/migration pending/.test(r.out) && /Do not run Playwright yourself/.test(r.out)) || r.out);
+
 // ---------------- stack lock + scratch runs (no Docker: --dry-run stops before compose/Playwright)
 const LOCK = (sb) => path.join(sb.stateDir, 'apps/fixture/stack.lock');
 const putLock = (sb, pid, startedAt = new Date().toISOString()) => write(LOCK(sb), JSON.stringify({ pid, cmd: 'e2e', startedAt }));

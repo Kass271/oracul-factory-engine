@@ -24,6 +24,8 @@ Below, `$E` = engine path, `$APP` = appDir, `$PD` = phaseDir. Agents: subagent t
 4. You do not write app code or tests yourself — agents do, inside the workflows.
 5. Honest end: if anything is red, your final message starts with `❌ RED` and lists what failed.
 6. Ask the user only in Step 1 (scope), Step 3 (plan), when the environment check fails, or when a BLOCKED slice stops the phase.
+7. E2E and the Docker stack only through `stack.mjs` (hook-enforced). If it refuses, report the reason — never run
+   Playwright or `docker compose` yourself.
 
 ## Start / resume
 `node factory-engine/bin/state.mjs show --json`

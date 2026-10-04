@@ -17,4 +17,4 @@ Backend   http://localhost:8080/api   (health: http://localhost:8080/actuator/he
 Stop with: node factory-engine/bin/stack.mjs down
 ```
 If it fails, show the log excerpt the script printed and the likely cause (Docker not running, port 4200/8080/5432 busy,
-build error). Do not change app code from this skill.
+build error). Do not change app code from this skill, and never run `docker compose` or Playwright directly — only `stack.mjs`.

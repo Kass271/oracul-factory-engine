@@ -103,7 +103,7 @@ function preconditions() {
   const problems = [];
   if (typeof args.grep !== 'string' || !args.grep) problems.push('--scratch needs --grep <spec file | title pattern> (scoped runs only)');
   const cfg = fs.readFileSync(path.join(ctx.appDir, 'e2e', 'playwright.config.ts'), 'utf8');
-  if (!scratchSupported(cfg)) problems.push('scratch runs need E2E_REPORT_DIR/E2E_OUTPUT_DIR support in e2e/playwright.config.ts');
+  if (!scratchSupported(cfg)) problems.push('scratch runs need E2E_REPORT_DIR/E2E_OUTPUT_DIR support in e2e/playwright.config.ts — migration pending (migrate.mjs at the next slice boundary). Do not run Playwright yourself; the workflow\'s official E2E step covers this round');
   problems.push(...scratchEnvProblems(e2eEnv({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, scratch }), ctx.appDir));
   return problems;
 }

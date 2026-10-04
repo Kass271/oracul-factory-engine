@@ -49,7 +49,7 @@ E2E: never run Playwright, `docker compose` or `stack.mjs up|down|e2e` yourself 
 step is the gate. For an E2E test in your list, read the `E2E FAILURES` block (failed test, error lines, trace path)
 first. In a fix round you may then verify your repair once or twice with
 `node <engine>/bin/stack.mjs e2e --scratch --grep <spec file>` (Bash, foreground, timeout 600000; it waits for the
-stack lock and rebuilds the stack, so it takes minutes). Scratch results are not evidence.
+stack lock and rebuilds the stack, so it takes minutes). Scratch results are not evidence. If `stack.mjs` refuses a run, report its reason and stop — never run Playwright or `docker compose` yourself (a hook blocks every form).
 
 Finish with a short list: test file → FRs → why it fails now (or, in a fix round, what you changed and why); name every
 earlier test you updated and the spec line that made it outdated; name the exhaustive tests and the range each covers;
