@@ -1134,6 +1134,21 @@ for (const [name, expectCode, answer] of [
   } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
 }
+for (const [name, expectCode, fresh] of [
+  ['workflow green: release reuses a full E2E run that passed on exactly this code — stack up, no new Playwright run', 0, 0],
+  ['workflow red: release runs Playwright when the last full run does not cover the code', 1, 1],
+]) {
+  if (filter && !name.includes(filter)) continue;
+  let got, note = '';
+  try {
+    const { result, calls } = await runWorkflow('finish-and-run.js', relArgs, (p, o) => (FRESH_PROBE.test(p) ? { exitCode: fresh, output: fresh ? 'INVALID code changed' : 'PASS covered' } : ok0(p, o)));
+    const detached = calls.some((c) => /stack\.mjs" e2e --detach/.test(c.prompt));
+    const upped = calls.some((c) => /stack\.mjs" up/.test(c.prompt));
+    got = result.status === 'GREEN' && upped ? (detached ? 1 : 0) : 'other';
+    if (got === 'other') note = JSON.stringify(result).slice(0, 300);
+  } catch (e) { got = 'ERR'; note = String(e); }
+  results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
+}
 for (const [name, expectCode, busyTimes] of [['workflow red: release stack busy twice → RED "e2e: stack busy", never triaged', 1, 2], ['workflow green: release stack busy once → rerun, GREEN', 0, 1]]) {
   if (filter && !name.includes(filter)) continue;
   let got, note = '';

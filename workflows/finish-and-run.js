@@ -108,14 +108,18 @@ async function role(name, prompt, label, schema) {
 //   3. `stack.mjs e2e-wait --max 480`, repeated while it answers 75 (still running), up to E2E_WAITS times
 // "stack busy" on 1 or 2 is rerun once; anything else infrastructure-like ends up in infraReason().
 const E2E_WAITS = 8
-async function e2eRun(label) {
+// reuse: when the last official full run passed on exactly this code (check-e2e-fresh), the stack is only brought up
+// (the app stays running for the user) and that run counts — its screenshots and report are already in place.
+async function e2eRun(label, { reuse = false } = {}) {
   const retryBusy = async (cmd, l) => {
     let r = await sh(cmd, l, { gate: true })
     if (infraReason(r) === 'stack busy') { log(`${l}: stack busy — rerunning once`); r = await sh(cmd, `${l} (stack busy, retry)`, { gate: true }) }
     return r
   }
+  const fresh = reuse ? await sh(node('checks/check-e2e-fresh.mjs'), `${label}: last full run still covers the code?`, { gate: true }) : null
   const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up')}`, `${label}: docker up`)
   if (up.exitCode !== 0) return { ...up, infra: infraReason(up) }
+  if (fresh && fresh.exitCode === 0) return { exitCode: 0, output: `E2E reused — ${fresh.output}`, infra: null }
   const start = await retryBusy(node('bin/stack.mjs', 'e2e --detach'), `${label}: start Playwright`)
   if (start.exitCode !== 0) return { ...start, infra: infraReason(start) }
   for (let i = 1; i <= E2E_WAITS; i++) {
@@ -197,7 +201,7 @@ if (infraStop) {
 
 // ---------------------------------------------------------------- Run + E2E
 phase('Run + E2E')
-let e2e = await e2eRun('docker up + e2e')
+let e2e = await e2eRun('docker up + e2e', { reuse: true })
 for (let r = 1; r < MAX && e2e.exitCode !== 0 && !e2e.infra; r++) {
   e2eFailures = failureBlock(e2e.output)
   await sh(node('bin/state.mjs', 'set subStep green'), `state → green (after e2e r${r})`)
