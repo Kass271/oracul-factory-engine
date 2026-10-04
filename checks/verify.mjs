@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE, STEPS, context, flakyPath, lastFailuresPath, lastRunPath, loadState, parseArgs, readJson, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
 import { flakyCases, junitCases, junitFailures, javaTestFile, recordFlaky, vitestFailedFiles } from './lib/red.mjs';
-import { layerCommand, relatedTests } from './lib/related.mjs';
+import { FALLOUT_MEANS, LEAK_MEANS, isolationVerdicts, layerCommand, relatedTests } from './lib/related.mjs';
 import { slowReport } from './lib/timing.mjs';
 
 const args = parseArgs();
@@ -88,6 +88,9 @@ if (!args.quick) {
       ...(layers.frontend?.exit ? vitestFailedFiles(layers.frontend.out || '') : []),
     ])];
     writeJson(lastFailuresPath(ctx.app), { at: new Date().toISOString(), files });
+    // Full run only: older failing tests (not related to the current slice) are rerun on their own once — the
+    // verdict names the cause (FALLOUT = broken by a code/contract change, LEAK = state leaking from other tests).
+    if (!related && files.length) isolateOlder(files);
   }
   const slow = slowReport(xmlDir);
   if (slow) console.log(`\n${slow}`);
@@ -95,6 +98,34 @@ if (!args.quick) {
   const flaky = flakyCases(junitCases(xmlDir, T0)).map((c) => `${c.classname}.${c.name}`);
   for (const f of flaky) console.log(`FLAKY    ${f} (failed, then passed on retry — recorded, not blocking)`);
   if (flaky.length && ctx.app) recordFlaky(flakyPath(ctx.app), ctx.state?.slice || ctx.state?.step || null, flaky);
+}
+
+function isolateOlder(files) {
+  const slice = ctx.state?.slice;
+  const rel = slice && ctx.phaseDir ? relatedTests({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice }) : null;
+  const mine = new Set(rel ? [...rel.backend, ...rel.frontend] : []);
+  const older = files.filter((f) => !mine.has(f)).slice(0, 8);
+  if (!older.length) return;
+  console.log(`\n== isolation: ${older.length} older failing test file(s) rerun on their own ==`);
+  const T1 = Date.now();
+  const alone = [];
+  for (const layer of ['backend', 'frontend']) {
+    const mineLayer = older.filter((f) => f.startsWith(`${layer}/`));
+    if (!mineLayer.length) continue;
+    const p = layerCommand(layer, ctx.appDir, mineLayer, { gradleTasks: ['test'], extraGradle: ['--console=plain', '-q'] });
+    const res = run(p.cmd, p.args, { cwd: path.join(ctx.appDir, layer), env: { ...process.env, CI: 'true' } });
+    if (layer === 'backend') {
+      const xmlDir = path.join(ctx.appDir, 'backend/build/test-results/test');
+      const fresh = junitCases(xmlDir, T1);
+      const flakyKeys = new Set(flakyCases(fresh).map((c) => `${c.classname}#${c.name}`));
+      const failedNow = new Set(junitFailures(xmlDir, T1).filter((f) => !flakyKeys.has(`${f.classname}#${f.name}`)).map((f) => javaTestFile(f.classname)));
+      // no fresh report at all (the rerun did not get to run tests) → count as still failing (fail-safe)
+      for (const f of mineLayer) if (failedNow.has(f) || !fresh.size) alone.push(f);
+    } else if (res.code) alone.push(...vitestFailedFiles(res.out || '').filter((f) => mineLayer.includes(f)).concat(vitestFailedFiles(res.out || '').length ? [] : mineLayer));
+  }
+  const v = isolationVerdicts(older, alone);
+  for (const f of v.fallout) console.log(`FALLOUT  ${f} — ${FALLOUT_MEANS}`);
+  for (const f of v.leak) console.log(`LEAK     ${f} — ${LEAK_MEANS}`);
 }
 
 function check(name, extra = []) {

@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ENGINE } from '../checks/lib/core.mjs';
 import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
-import { relatedTests } from '../checks/lib/related.mjs';
+import { isolationVerdicts, relatedTests } from '../checks/lib/related.mjs';
 import { diagnostics, summaryLine } from '../checks/lib/compile.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
@@ -440,6 +440,28 @@ test('stop red: a related-only GREEN verify is not a finished build', 2, (sb) =>
   sb.state({ step: '04_build', lastVerify: { at: new Date(Date.now() + 60_000).toISOString(), result: 'GREEN', failing: [], related: true } });
   return hook(sb, 'stop', { stop_hook_active: false });
 });
+
+// ---------------- WP-K: older failing tests rerun alone in a full verify → FALLOUT (broken by a change) / LEAK (state)
+test('isolation green: still failing alone = FALLOUT, passing alone = LEAK', 0, () => {
+  const v = isolationVerdicts(['a/AIT.java', 'b/BIT.java'], ['a/AIT.java']);
+  return { code: v.fallout.join() === 'a/AIT.java' && v.leak.join() === 'b/BIT.java' ? 0 : 1, out: JSON.stringify(v) };
+});
+test('isolation red: an older test that fails in the full verify is rerun and labelled', 1, (sb) => {
+  sb.state({ slice: '01_rooms', step: '04_build' }); oldFile(sb); attempts(sb, 'com.oracul.app.old.OldIT', false);
+  const later = new Date(Date.now() + 3_600_000);
+  fs.utimesSync(sb.p('backend/build/test-results/test/TEST-com.oracul.app.old.OldIT.xml'), later, later);
+  return node(sb, 'checks/verify.mjs');
+}, (sb, r) => (/isolation: 1 older failing test file/.test(r.out) && new RegExp(`FALLOUT\\s+${OLD.replace(/\./g, '\\.')} — fails on its own`).test(r.out)) || r.out);
+test('isolation green: a failing test of the current slice is not "older" — no isolation rerun', 1, (sb) => {
+  sb.state({ slice: '01_rooms', step: '04_build' }); attempts(sb, 'com.oracul.app.rooms.RoomsApiIT', false);
+  const later = new Date(Date.now() + 3_600_000);
+  fs.utimesSync(sb.p('backend/build/test-results/test/TEST-com.oracul.app.rooms.RoomsApiIT.xml'), later, later);
+  return node(sb, 'checks/verify.mjs');
+}, (sb, r) => !/isolation:/.test(r.out) || r.out);
+test('isolation green: a related-only verify never runs the isolation', 1, (sb) => {
+  sb.state({ slice: '01_rooms', step: '04_build' }); oldFile(sb); attempts(sb, 'com.oracul.app.old.OldIT', false);
+  return node(sb, 'checks/verify.mjs', ['--related']);
+}, (sb, r) => !/isolation:/.test(r.out) || r.out);
 
 // ---------------- gen-traceability
 test('gen-traceability green: all FRs ✔', 0, (sb) => {

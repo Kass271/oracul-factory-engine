@@ -183,13 +183,13 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
           }
           const why = testBugReason(f.text);
           if (why) bugs.push(`${f.classname}.${f.name}: ${why}`);
-          else if (!expected.has(file) && exists(path.join(appDir, file))) bugs.push(`${f.classname}.${f.name}: an older test fails although no production code changed — the new tests leak state into it (shared rows, static counters, request logs, unfinished async work) or it must be updated under "Changes earlier behaviour"`);
+          else if (!expected.has(file) && exists(path.join(appDir, file))) bugs.push(`${f.classname}.${f.name}: an older test fails — production code has not changed in RED, so either the new tests leak state into it (shared rows, static counters, request logs, unfinished async work) or the contract/generated code changed under it (fallout: list it under "Changes earlier behaviour" and update it)`);
         }
       } else {
         const why = testBugReason(res.out);
         if (why) bugs.push(`frontend: ${why}`);
         for (const file of vitestFailedFiles(res.out)) {
-          if (!expected.has(file) && exists(path.join(appDir, file))) bugs.push(`${file}: an older spec fails although no production code changed — test isolation or an unlisted superseded expectation`);
+          if (!expected.has(file) && exists(path.join(appDir, file))) bugs.push(`${file}: an older spec fails — production code has not changed in RED: test isolation, or contract/generated-client fallout to list under "Changes earlier behaviour"`);
         }
       }
       if (bugs.length) { cls = 'FAIL, but some failures are test bugs (red for the wrong reason)'; wrong.push(...bugs); }

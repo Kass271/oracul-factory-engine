@@ -51,3 +51,16 @@ export function layerCommand(layer, appDir, files = null, { gradleTasks = ['test
   const include = files.map((f) => path.relative('frontend', f)).flatMap((f) => ['--include', f]);
   return { cmd: 'npm', args: [...base, '--', ...include], scoped: true, note: '' };
 }
+
+// Older tests that failed in a full run, rerun on their own: still failing → FALLOUT (a production or contract change
+// broke them, or they are outdated); passing alone → LEAK (other tests leak state into them). Pure: the caller runs.
+// failedBefore / failedAlone: app-relative test files.
+export function isolationVerdicts(failedBefore, failedAlone) {
+  const alone = new Set(failedAlone);
+  return {
+    fallout: failedBefore.filter((f) => alone.has(f)),
+    leak: failedBefore.filter((f) => !alone.has(f)),
+  };
+}
+export const FALLOUT_MEANS = 'fails on its own: a production or contract change broke it — if this slice\'s spec changes that behaviour the test is outdated (tester; list it under "Changes earlier behaviour"), otherwise the code broke it (builders)';
+export const LEAK_MEANS = 'passes on its own: other tests leak state into it (shared rows, static counters, unfinished async work) — tester';
