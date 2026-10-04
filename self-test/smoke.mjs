@@ -143,6 +143,12 @@ class FlakyOnceTest {
   return ok ? v : { code: 1, out: v.out };
 });
 step('GREEN: verify again without the flaky test (clean reports for the close)', 0, () => sh('checks/verify.mjs'));
+// The fix rounds' verify for real: related tests only — the Gradle command must be valid (issue 8: --tests after
+// jacocoTestReport made every related verify RED without running a test).
+step('GREEN: verify --related runs the slice\'s tests for real and is GREEN', 0, () => {
+  const v = sh('checks/verify.mjs', ['--related', '--slice', '01_todos']);
+  return v.code === 0 && /VERIFY \(related tests\) GREEN/.test(v.out) && /--tests com\.oracul\.app\.todos/.test(v.out) ? v : { code: v.code || 1, out: v.out };
+});
 
 sh('bin/state.mjs', ['set', 'subStep', 'review']);
 step('REVIEW: reviewer may not touch code', 2, () => hook('guard-edits', W('backend/src/main/java/com/oracul/app/todos/TodoEntity.java')));

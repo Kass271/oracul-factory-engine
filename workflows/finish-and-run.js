@@ -71,9 +71,12 @@ async function sh(cmd, label, opts = {}) {
   if (/\[oracul guard\]|PreToolUse:Bash hook error/.test(output)) return { exitCode: r.exitCode || 1, output }
   return { exitCode: 125, output }
 }
+// A broken command line (a factory bug, not the app's code) — the builders cannot fix it.
+const HARNESS_ERROR = /Problem configuring task \S+ from command line|Unknown command-line option '[^']+'|Task '[^']+' not found in (root )?project|Could not find or load main class org\.gradle\.wrapper|Unknown option: --/
 // Infrastructure failures are never code failures: no triage, no fix round. null = a real result.
 function infraReason(r) {
   const out = r.output || ''
+  if (r.exitCode !== 0 && HARNESS_ERROR.test(out)) return `factory command error (${(out.match(HARNESS_ERROR) || [''])[0].slice(0, 80)})`
   if (r.exitCode === 3 || /STACK BUSY/.test(out)) return 'stack busy'
   if (isGuardBlock(r)) return 'blocked by guard hook'
   if (r.exitCode === 125) return 'runner returned no exit code'

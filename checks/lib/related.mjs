@@ -42,7 +42,10 @@ export function layerCommand(layer, appDir, files = null, { gradleTasks = ['test
   if (layer === 'backend') {
     const classes = (files || []).map(javaClass).filter(Boolean);
     const filter = files ? classes.flatMap((c) => ['--tests', c]) : [];
-    return { cmd: './gradlew', args: [...gradleTasks, ...extraGradle, ...filter], scoped: !!files && classes.length > 0, note: files && !classes.length ? 'no related backend test class — whole layer' : '' };
+    // A task option belongs to the task right before it: --tests must follow `test`, never another task
+    // (`test jacocoTestReport --tests X` makes Gradle reject --tests for jacocoTestReport).
+    const tasks = gradleTasks.flatMap((t) => (t === 'test' ? ['test', ...filter] : [t]));
+    return { cmd: './gradlew', args: [...tasks, ...extraGradle], scoped: !!files && classes.length > 0, note: files && !classes.length ? 'no related backend test class — whole layer' : '' };
   }
   const base = ['run', 'test:ci', '--silent'];
   if (!files) return { cmd: 'npm', args: base, scoped: false, note: '' };
@@ -50,6 +53,17 @@ export function layerCommand(layer, appDir, files = null, { gradleTasks = ['test
   if (!frontendFilterSupported(appDir)) return { cmd: 'npm', args: base, scoped: false, note: 'frontend test:ci is not `ng test` — no file filter, whole layer (fast)' };
   const include = files.map((f) => path.relative('frontend', f)).flatMap((f) => ['--include', f]);
   return { cmd: 'npm', args: [...base, '--', ...include], scoped: true, note: '' };
+}
+
+// Gradle CLI sanity: every --tests directly follows the `test` task or another --tests pair.
+export function gradleFilterValid(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '--tests') continue;
+    let j = i - 1;
+    while (j >= 1 && args[j - 1] === '--tests') j -= 2;
+    if (args[j] !== 'test') return false;
+  }
+  return true;
 }
 
 // Older tests that failed in a full run, rerun on their own: still failing → FALLOUT (a production or contract change

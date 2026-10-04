@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ENGINE } from '../checks/lib/core.mjs';
 import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
-import { isolationVerdicts, relatedTests } from '../checks/lib/related.mjs';
+import { gradleFilterValid, isolationVerdicts, layerCommand, relatedTests } from '../checks/lib/related.mjs';
 import { diagnostics, summaryLine } from '../checks/lib/compile.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
@@ -362,7 +362,7 @@ test('related green: a changed file that no longer exists is left out', 0, (sb) 
 test('red-check green: --scope slice runs only the related backend classes', 0, (sb) => {
   oldTest(sb);
   return node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'slice', '--dry-run']);
-}, (sb, r) => (/backend: \.\/gradlew test --console=plain --continue --tests com\.oracul\.app\.rooms\.RoomsApiIT/.test(r.out) && !/OldIT/.test(r.out)
+}, (sb, r) => (/backend: \.\/gradlew test --tests com\.oracul\.app\.rooms\.RoomsApiIT --console=plain --continue/.test(r.out) && !/OldIT/.test(r.out)
   && !fs.existsSync(sb.doc('04_build/01_rooms/red-evidence.md.new'))) || r.out);
 test('red-check green: --scope full (default) runs the whole layer', 0, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--dry-run']),
   (sb, r) => (/backend: \.\/gradlew test --console=plain --continue\s*$/m.test(r.out) && !/--tests/.test(r.out)) || r.out);
@@ -372,6 +372,13 @@ test('red-check green: frontend without `ng test` runs in full and says so', 0, 
   sb.edit('frontend/package.json', /"test:ci": "[^"]*"/, '"test:ci": "vitest run"');
   return node(sb, 'bin/red-check.mjs', ['--slice', '02_search', '--scope', 'slice', '--dry-run']);
 }, (sb, r) => (/frontend: npm run test:ci --silent\s+# frontend test:ci is not `ng test`/.test(r.out)) || r.out);
+// Gradle applies a task option to the task right before it: --tests must follow `test` (issue 8, slice 03)
+test('gradle green: every filtered command puts --tests right after test', 0, (sb) => {
+  const f = ['backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java', OLD];
+  const cmds = [layerCommand('backend', sb.appDir, f), layerCommand('backend', sb.appDir, f, { gradleTasks: ['test', 'jacocoTestReport'], extraGradle: ['-q'] })];
+  return { code: cmds.every((c) => gradleFilterValid(c.args) && c.args.filter((a) => a === '--tests').length === 2) ? 0 : 1, out: cmds.map((c) => c.args.join(' ')).join(' | ') };
+});
+test('gradle red: --tests after jacocoTestReport (the slice-03 command) is invalid', 1, () => ({ code: gradleFilterValid(['test', 'jacocoTestReport', '--console=plain', '-q', '--tests', 'a.B']) ? 0 : 1, out: '' }));
 test('red-check red: slice not in the plan', 1, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '09_nope', '--dry-run']));
 test('red-check red: unknown --scope', 1, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'some', '--dry-run']));
 test('red-check green: --dry-run writes no evidence', 0, (sb) => { sb.rm('docs/phase-01_mvp/04_build/01_rooms/red-evidence.md'); return node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'slice', '--dry-run']); },
@@ -465,7 +472,7 @@ test('verify green: a newer file only in the generated client (frontend/src/app/
 
 // ---------------- verify --related (A5): development loop only, never the slice gate
 test('verify green: --related runs only the related tests and skips coverage', 1, (sb) => { sb.state({ slice: '01_rooms', step: '04_build' }); return node(sb, 'checks/verify.mjs', ['--related']); },
-  (sb, r) => (/== backend: \.\/gradlew test jacocoTestReport --console=plain -q --tests com\.oracul\.app\.rooms\.RoomsApiIT ==/.test(r.out)
+  (sb, r) => (/== backend: \.\/gradlew test --tests com\.oracul\.app\.rooms\.RoomsApiIT --console=plain -q ==/.test(r.out)
     && /SKIP\s+frontend: no related tests/.test(r.out) && /SKIP\s+check-coverage: related tests only/.test(r.out) && /VERIFY \(related tests\) RED/.test(r.out)
     && JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/state.json'), 'utf8')).lastVerify.related === true
     && !fs.existsSync(lastRunFile(sb))) || r.out);
@@ -1394,6 +1401,21 @@ wf('workflow green: E2E FAILURES block reaches the next fix round; builders told
 wf('workflow green: a note() with ``` blocks is fenced so the runner sees the whole command', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)); })(), ({ calls }) => {
   const n = calls.find((c) => c.opts.label === 'run: note Round 1');
   return n && /```/.test(runnerCommand(n.prompt)) && /ORACUL_EOF$/.test(runnerCommand(n.prompt)) ? 0 : 1;
+});
+const GRADLE_CLI = "FAILURE: Build failed with an exception.\n* What went wrong:\nProblem configuring task :jacocoTestReport from command line.\n> Unknown command-line option '--tests'.";
+wf('workflow red: a Gradle command-line error in verify → STOPPED (factory bug), no triage, no fix round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  verifyAs(() => ({ exitCode: 1, output: GRADLE_CLI })), ({ result, calls }) =>
+    (result.status === 'STOPPED' && /^verify: factory command error \(Problem configuring task :jacocoTestReport/.test(result.failing[0]) && !triaged(calls) && !calls.some((c) => / r2$/.test(c.opts.label || '')) ? 1 : 0));
+wf('workflow green: a real test failure is still triaged (not taken for a harness error)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }),
+  verifyAs(() => ({ exitCode: 1, output: 'RoomsApiIT > createsRoom() FAILED\n    AssertionFailedError: Status expected:<201> but was:<501>' })), ({ calls }) => (triaged(calls) ? 0 : 1));
+const parkAnswer = (parkCode) => (p, o) => (LOOP_VERIFY.test(p) ? { exitCode: 1, output: 'RED' } : /checkout HEAD -- backend/.test(p) ? { exitCode: parkCode, output: parkCode ? 'Permission denied: git clean' : 'committed abc' } : ok0(p, o));
+wf('workflow red: the park is refused → STOPPED "park: …", the slice is not marked BLOCKED', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }), parkAnswer(1), ({ result, calls }) => {
+  const parkCmd = runnerCommand(calls.find((c) => /checkout HEAD -- backend/.test(c.prompt))?.prompt || '');
+  return result.status === 'STOPPED' && result.failing.some((f) => /^park: exit 1/.test(f)) && parkCmd.indexOf('BLOCKED') > parkCmd.indexOf('checkout HEAD') ? 1 : 0;
+});
+wf('workflow green: a park that runs → BLOCKED with the impact read before it', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }), parkAnswer(0), ({ result, calls }) => {
+  const i = calls.findIndex((c) => /state\.mjs" impact 01_rooms/.test(c.prompt)), p = calls.findIndex((c) => /checkout HEAD -- backend/.test(c.prompt));
+  return result.status === 'BLOCKED' && result.decision === 'CONTINUE' && i >= 0 && p > i ? 0 : 1;
 });
 for (const c of asyncCases) {
   wfStarted = true;

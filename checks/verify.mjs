@@ -74,7 +74,8 @@ function layer(name, cwd, cmd, cmdArgs) {
 if (!args.quick) {
   for (const name of ['backend', 'frontend']) {
     if (related && !related[name].length) { console.log(`SKIP     ${name}: no related tests`); continue; }
-    const p = layerCommand(name, ctx.appDir, related ? related[name] : null, { gradleTasks: ['test', 'jacocoTestReport'], extraGradle: ['--console=plain', '-q'] });
+    // Related runs skip coverage (the slice gate checks it); jacocoTestReport still follows test as its finalizer.
+    const p = layerCommand(name, ctx.appDir, related ? related[name] : null, { gradleTasks: related ? ['test'] : ['test', 'jacocoTestReport'], extraGradle: ['--console=plain', '-q'] });
     if (p.note) console.log(`NOTE     ${name}: ${p.note}`);
     layer(name, path.join(ctx.appDir, name), p.cmd, p.args);
   }

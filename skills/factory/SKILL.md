@@ -120,6 +120,11 @@ Loop:
    Result `STOPPED` with failing `close: …` → the slice passed verify, E2E and review but its close step failed
    (the line says which check). Its code is kept, nothing was committed or parked. Tell the user what failed;
    never mark the slice DONE by hand; "continue" resumes it at stage `green`.
+   Result `STOPPED` with failing `park: …` → the slice failed its rounds but could not be parked (the park was refused
+   or failed). It is NOT marked BLOCKED; tell the user the failing gates and the park reason; "continue" resumes it at
+   stage green, or the user decides to park it.
+   Result `STOPPED` with failing `<gate>: factory command error (…)` → a broken factory command, not the app's code; no
+   fix round was spent. Stop and report it as a factory bug.
    Result `STOPPED` with failing `start: …` → the green stage refused to start because a doc the close step needs is
    missing or invalid; no builder ran. If it names `02_specs` (slice spec lines): run `oracul:analyst` with the Step 4a
    spec-delta prompt for this slice (docs only), then `B` with `stage: "green"` and `red: { exitCode: 0, output:

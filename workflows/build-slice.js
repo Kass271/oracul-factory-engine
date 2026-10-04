@@ -91,9 +91,12 @@ async function sh(cmd, label, opts = {}) {
   if (/\[oracul guard\]|PreToolUse:Bash hook error/.test(output)) return { exitCode: r.exitCode || 1, output }
   return { exitCode: 125, output }
 }
+// A broken command line (a factory bug, not the app's code) — the builders cannot fix it.
+const HARNESS_ERROR = /Problem configuring task \S+ from command line|Unknown command-line option '[^']+'|Task '[^']+' not found in (root )?project|Could not find or load main class org\.gradle\.wrapper|Unknown option: --/
 // Infrastructure failures are never code failures: no triage, no fix round. null = a real result.
 function infraReason(r) {
   const out = r.output || ''
+  if (r.exitCode !== 0 && HARNESS_ERROR.test(out)) return `factory command error (${(out.match(HARNESS_ERROR) || [''])[0].slice(0, 80)})`
   if (r.exitCode === 3 || /STACK BUSY/.test(out)) return 'stack busy'
   if (isGuardBlock(r)) return 'blocked by guard hook'
   if (r.exitCode === 125) return 'runner returned no exit code'
@@ -386,14 +389,22 @@ if (status === 'DONE') {
 
 // BLOCKED: write the failure note, park the code, keep the docs, decide CONTINUE/STOP.
 await agent(`Write ${sliceDir}/failure-note.md for the Oracul slice ${S} (FRs ${FRS}) using the template ${A.engine}/templates/docs/failure-note.md.\nFacts (use only these and the files ${sliceDir}/rounds.md, ${sliceDir}/red-evidence.md, ${sliceDir}/review-findings.json if present):\n- rounds used: ${rounds} of ${MAX}\n- failing: ${failing.join(', ')}\n- last output:\n${(feedback || red.output || '').slice(-3000)}\nKeep the heading "## What failed". Write only that one file.`, { label: `failure note ${S}`, model: 'sonnet', effort: 'medium' })
+// The impact is read first (read-only), then the park runs as one checked gate. The slice is marked BLOCKED only after
+// the code was parked and the docs committed — if the park cannot run (refused, timed out, no exit code), nothing is
+// marked: the slice STOPS with its code kept and the user decides.
+const imp = await sh(node('bin/state.mjs', `impact ${S}`), `impact ${S}`, { gate: true })
+const m = imp.output.match(/\{"slice".*\}/)
+const impact = m ? JSON.parse(m[0]) : { decision: 'STOP', dependents: ['unknown — impact not readable'] }
 const park = await sh([
-  node('bin/state.mjs', `slice ${S} BLOCKED`),
-  node('bin/state.mjs', 'set subStep none'),
   `git -C "${A.appDir}" checkout HEAD -- backend frontend e2e api`,
   `git -C "${A.appDir}" clean -fdq -- backend/src frontend/src e2e/tests`,
   node('bin/commit.mjs', `--message "${A.phase} ${S}: BLOCKED after ${rounds} round(s) — docs only (${FRS})"`),
-  node('bin/state.mjs', `impact ${S}`),
-].join(' && '), `park ${S}`)
-const m = park.output.match(/\{"slice".*\}/)
-const impact = m ? JSON.parse(m[0]) : { decision: 'STOP', dependents: ['unknown — impact not readable'] }
+  node('bin/state.mjs', `slice ${S} BLOCKED`),
+  node('bin/state.mjs', 'set subStep none'),
+].join(' && '), `park ${S}`, { gate: true })
+if (park.exitCode !== 0) {
+  const why = infraReason(park) || `exit ${park.exitCode}`
+  await note('Park failed', `- The slice failed after ${rounds} round(s) (${failing.join(', ')}), but parking it failed: ${why}.\n- Not marked BLOCKED; the code is in the working tree as far as the park got. The user decides (continue the slice, or park it).\n- Output:\n\n\`\`\`\n${park.output.slice(-1500)}\n\`\`\``)
+  return { status: 'STOPPED', slice: S, rounds, failing: [...failing, `park: ${why}`], output: park.output.slice(-1500) }
+}
 return { status: 'BLOCKED', slice: S, rounds, failing, decision: impact.decision, dependents: impact.dependents }
