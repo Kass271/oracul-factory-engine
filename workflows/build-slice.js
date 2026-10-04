@@ -261,17 +261,23 @@ if (status === 'GREEN-PENDING') status = 'BLOCKED'
 
 // ---------------------------------------------------------------- Close
 phase('Close')
+// Close: re-verify only if something changed since the round's full verify (a partial test run by the reviewer
+// rewrites the coverage report and JUnit XML), then the checks, then the mutations — baseline, commit, and DONE last.
+// A failing close never parks: verify, E2E and review already passed, so the code stays and the slice STOPS.
 if (status === 'DONE') {
   const close = await sh([
+    node('checks/verify.mjs', '--reuse-if-fresh'),
+    node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage done`),
+    node('checks/check-coverage.mjs', '--update'),
+    node('bin/commit.mjs', `--message "${A.phase} ${S}: done (${FRS})"`),
     node('bin/state.mjs', `slice ${S} DONE`),
     node('bin/state.mjs', 'set subStep none'),
-    node('checks/check-coverage.mjs', '--update'),
-    node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage done`),
-    node('bin/commit.mjs', `--message "${A.phase} ${S}: done (${FRS})"`),
   ].join(' && '), `close ${S}`, { gate: true })
-  if (infraReason(close)) return { status: 'STOPPED', slice: S, rounds, failing: [`close: ${infraReason(close)}`], output: close.output.slice(-1500) }
-  if (close.exitCode !== 0) { status = 'BLOCKED'; failing = ['close: artifacts/coverage'] ; feedback = close.output }
-  else return { status, slice: S, rounds, failing: [], output: close.output.slice(-1500) }
+  if (close.exitCode === 0) return { status, slice: S, rounds, failing: [], output: close.output.slice(-1500) }
+  const why = infraReason(close) || (close.output.split('\n').map((l) => l.trim()).find((l) => /^(INVALID|MISSING)\b|^==== VERIFY RED/.test(l)) || `exit ${close.exitCode}`)
+  await note('Close failed', `- ${why}\n- Not parked: verify, E2E and review had passed. The slice stays IN_PROGRESS with its code; "continue" resumes it at stage green.\n- Output:\n\n\`\`\`\n${close.output.slice(-1500)}\n\`\`\``)
+  await sh(node('bin/state.mjs', 'set subStep green'), 'state → green (close failed)')
+  return { status: 'STOPPED', slice: S, rounds, failing: [`close: ${why}`], output: close.output.slice(-1500) }
 }
 
 // BLOCKED: write the failure note, park the code, keep the docs, decide CONTINUE/STOP.

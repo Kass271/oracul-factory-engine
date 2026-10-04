@@ -12,8 +12,12 @@ Covers: FR-1, FR-2
 ## Behaviour
 ### FR-1 — Add and list todos
 - Happy path: POST /api/todos {title} → 201 Todo; GET /api/todos → all todos ordered by id
+- Changes earlier behaviour: none
+- Ranges & invariants: none
 ### FR-2 — Reject an empty title
 - Errors: title "" or blank → 400 ApiError.code VALIDATION_FAILED → "title: …"
+- Changes earlier behaviour: none
+- Ranges & invariants: none
 
 ## API
 | Method | Path | operationId | Request | Responses |

@@ -104,6 +104,9 @@ Loop:
    parked; the slice is still IN_PROGRESS with its code in the working tree. Stop the phase, tell the user the reason
    and the slice, and ask them to fix the cause. "continue" then resumes the slice at stage `green`
    (red: { exitCode: 0, output: "resumed" }). Never delete `state/apps/<app>/stack.lock` yourself.
+   Result `STOPPED` with failing `close: …` → the slice passed verify, E2E and review but its close step failed
+   (the line says which check). Its code is kept, nothing was committed or parked. Tell the user what failed;
+   never mark the slice DONE by hand; "continue" resumes it at stage `green`.
    Result `BLOCKED` with `decision: "CONTINUE"` → tell the user (slice, FRs not delivered, failure note path), continue.
    Result `BLOCKED` with `decision: "STOP"` → stop the phase; report the failure note and the dependent slices; ask the user how to proceed.
 4. A slice BLOCKED with `failing: ["e2e: stack busy"]` was not a code failure: another stack operation held the lock

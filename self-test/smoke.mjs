@@ -119,12 +119,27 @@ step('REVIEW: reviewer may not touch code', 2, () => hook('guard-edits', W('back
 step('REVIEW: subagent-stop blocks a reviewer without findings file', 2, () => hook('subagent-stop', { agent_type: 'oracul:reviewer' }));
 copy(path.join(SMOKE, 'review', 'review-findings.json'), path.join(docs('04_build'), '01_todos', 'review-findings.json'));
 step('REVIEW: findings clean', 0, () => sh('checks/check-review.mjs', ['--slice', '01_todos']));
-step('slice close: DONE + coverage ratchet + artifacts + commit', 0, () => {
-  for (const a of [['slice', '01_todos', 'DONE'], ['set', 'subStep', 'none']]) sh('bin/state.mjs', a);
-  for (const [s, a] of [['checks/check-coverage.mjs', ['--update']], ['checks/check-artifacts.mjs', ['--step', '04_build']], ['bin/commit.mjs', ['--message', `${PHASE} 01_todos: done (FR-1, FR-2)`]]]) {
-    const r = sh(s, a); if (r.code) return r;
-  }
-  return { code: 0, out: '' };
+// A partial test run after the round's verify (as a reviewer might do) rewrites the JaCoCo report and JUnit XML from
+// one class. The close must notice it and re-verify instead of reading a false coverage drop.
+step('REVIEW: a partial backend test run after verify (one test class)', 0, () => {
+  const x = spawnSync('./gradlew', ['test', '--tests', 'com.oracul.app.todos.TodosApiIT', '--console=plain', '-q'], { cwd: path.join(appDir, 'backend'), env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  return { code: x.status, out: (x.stdout || '') + (x.stderr || '') };
+});
+step('slice close as the workflow runs it: verify --reuse-if-fresh → FULL run → artifacts → coverage --update → commit → DONE', 0, () => {
+  const v = sh('checks/verify.mjs', ['--reuse-if-fresh']);
+  if (v.code || !/running a full verify/.test(v.out)) return { code: v.code || 1, out: `expected a full re-verify:\n${v.out}` };
+  for (const [s, a] of [
+    ['checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_todos', '--stage', 'done']],
+    ['checks/check-coverage.mjs', ['--update']],
+    ['bin/commit.mjs', ['--message', `${PHASE} 01_todos: done (FR-1, FR-2)`]],
+    ['bin/state.mjs', ['slice', '01_todos', 'DONE']],
+    ['bin/state.mjs', ['set', 'subStep', 'none']],
+  ]) { const r = sh(s, a); if (r.code) return r; }
+  return sh('checks/check-artifacts.mjs', ['--step', '04_build']);
+});
+step('a second close-time verify with nothing changed reuses the full verify (no extra time)', 0, () => {
+  const v = sh('checks/verify.mjs', ['--reuse-if-fresh']);
+  return /verify: reusing the full GREEN verify/.test(v.out) ? v : { code: 1, out: v.out };
 });
 
 // ---------------------------------------------------------------- Step 5

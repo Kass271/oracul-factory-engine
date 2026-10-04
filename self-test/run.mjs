@@ -596,6 +596,8 @@ test('integrity: plugin, agents, skills, hooks, workflows parse', 0, () => {
 // The command inside a runner prompt: between `<fence>bash` and the same fence (the fence is longer than any backtick
 // run in the command).
 const runnerCommand = (p) => { const m = p.match(/(`{3,})bash\n([\s\S]*?)\n\1\n/); return m ? m[2] : ''; };
+// The verify of the green loop — NOT the close chain's `verify.mjs --reuse-if-fresh`.
+const LOOP_VERIFY = /checks\/verify\.mjs"(?! --reuse-if-fresh)/;
 async function runWorkflow(file, args, answer, source) {
   const src = (source ?? fs.readFileSync(path.join(ENGINE, 'workflows', file), 'utf8')).replace(/^export const meta/m, 'const meta');
   const AsyncFn = Object.getPrototypeOf(async () => {}).constructor;
@@ -640,7 +642,7 @@ wf('workflow red: tester red prompt without self-check would be caught', 1, wfAr
 wf('workflow red: failed red-check → BLOCKED', 1, wfArgs({ stage: 'green', red: { exitCode: 2, output: 'COMPILE-ERROR' } }), ok0,
   ({ result }) => (result.status === 'BLOCKED' && result.failing.includes('red-check') ? 1 : 0));
 wf('workflow green: verify → e2e → review → DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) => {
-  const order = calls.map((c) => c.prompt).map((p) => (/verify\.mjs/.test(p) ? 'verify' : /stack\.mjs" e2e-wait/.test(p) ? 'e2e' : /check-review/.test(p) ? 'review' : null)).filter(Boolean);
+  const order = calls.map((c) => c.prompt).map((p) => (LOOP_VERIFY.test(p) ? 'verify' : /stack\.mjs" e2e-wait/.test(p) ? 'e2e' : /check-review/.test(p) ? 'review' : null)).filter(Boolean);
   return result.status === 'DONE' && order.join(',') === 'verify,e2e,review' ? 0 : 1;
 });
 wf('workflow green: test finding goes to tester, code finding to builders', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
@@ -669,7 +671,7 @@ wf('workflow green: official E2E = set subStep e2e && up, then detach, then wait
   return up >= 0 && up < det && det < wait && setFirst && noChange ? 0 : 1;
 });
 const busyThen = (busyTimes) => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) ? (n++ < busyTimes ? { exitCode: 3, output: 'STACK BUSY: e2e by pid 42 since x' } : { exitCode: 0, output: 'E2E PASS' }) : ok0(p, o)); };
-const verifyAs = (fn) => (p, o) => (/checks\/verify\.mjs"/.test(p) ? fn(p, o) : ok0(p, o));
+const verifyAs = (fn) => (p, o) => (LOOP_VERIFY.test(p) ? fn(p, o) : ok0(p, o));
 const triaged = (calls) => calls.some((c) => /^triage/.test(c.opts.label || ''));
 wf('workflow green: runner says 1 but the sentinel says 0 → verify GREEN, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 1, output: 'node: something: No such file or directory\nORACUL_EXIT=0', raw: true })), ({ result, calls }) => (result.status === 'DONE' && !triaged(calls) ? 0 : 1));
@@ -678,15 +680,15 @@ wf('workflow red: runner says 0 but the sentinel says 1 → verify RED, triaged'
 wf('workflow red: no sentinel twice → STOPPED "verify: runner returned no exit code", no triage, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 0, output: 'looks fine', raw: true })), ({ result, calls }) =>
     (result.status === 'STOPPED' && result.failing.includes('verify: runner returned no exit code') && !triaged(calls) && !parked(calls)
-      && calls.filter((c) => /checks\/verify\.mjs"/.test(c.prompt)).length === 2 ? 1 : 0));
+      && calls.filter((c) => LOOP_VERIFY.test(c.prompt)).length === 2 ? 1 : 0));
 wf('workflow green: no sentinel once, then present → normal, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
   let n = 0;
   return verifyAs(() => (n++ ? { exitCode: 0, output: 'GREEN' } : { exitCode: 0, output: 'truncated', raw: true }));
-})(), ({ result, calls }) => (result.status === 'DONE' && calls.filter((c) => /checks\/verify\.mjs"/.test(c.prompt)).length === 2 ? 0 : 1));
+})(), ({ result, calls }) => (result.status === 'DONE' && calls.filter((c) => LOOP_VERIFY.test(c.prompt)).length === 2 ? 0 : 1));
 wf('workflow red: runner timeout 124 → STOPPED "verify: timed out", not rerun, no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 124, output: 'BUILD …' })), ({ result, calls }) =>
     (result.status === 'STOPPED' && result.failing.includes('verify: timed out') && !triaged(calls)
-      && calls.filter((c) => /checks\/verify\.mjs"/.test(c.prompt)).length === 1 ? 1 : 0));
+      && calls.filter((c) => LOOP_VERIFY.test(c.prompt)).length === 1 ? 1 : 0));
 wf('workflow green: exitSource "runner" restores the old behaviour (runner exitCode, no sentinel appended)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, exitSource: 'runner', maxRounds: 1 }),
   verifyAs(() => ({ exitCode: 1, output: 'ORACUL_EXIT=0', raw: true })), ({ calls }) =>
     (triaged(calls) && !calls.some((c) => /ORACUL_EXIT=\$\?/.test(c.prompt)) ? 0 : 1));
@@ -701,6 +703,22 @@ wf('workflow red: E2E never finishes → STOPPED "e2e: timed out" after 8 waits,
   (result.status === 'STOPPED' && result.failing.includes('e2e: timed out') && waits(calls) === 8 && !triaged(calls) ? 1 : 0));
 wf('workflow red: E2E worker died → STOPPED "e2e: e2e worker lost", no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), waitAnswers([75, 4]), ({ result, calls }) =>
   (result.status === 'STOPPED' && result.failing.includes('e2e: e2e worker lost') && !triaged(calls) ? 1 : 0));
+const CLOSE = /verify\.mjs" --reuse-if-fresh[\s\S]*slice 01_rooms DONE/;
+const failureNoted = (calls) => calls.some((c) => /^failure note/.test(c.opts.label || ''));
+wf('workflow red: close fails (a check says INVALID) → STOPPED "close: INVALID …", not parked, no failure note', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (CLOSE.test(p) ? { exitCode: 1, output: 'verify: reusing the full GREEN verify of x\nINVALID  docs/phase-01_mvp/02_specs [sliceSpec] — FR-1 lacks "- Ranges & invariants"\nRESULT  FAIL (1 problem)' } : ok0(p, o)),
+  ({ result, calls }) => (result.status === 'STOPPED' && result.failing.some((f) => /^close: INVALID .*sliceSpec/.test(f)) && !parked(calls) && !failureNoted(calls)
+    && calls.some((c) => /set subStep green/.test(c.prompt) && /close failed/.test(c.opts.label || '')) ? 1 : 0));
+wf('workflow red: close re-verify finds RED → STOPPED "close: ==== VERIFY RED …", not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (CLOSE.test(p) ? { exitCode: 1, output: 'verify: test/coverage output changed after it (backend/build/reports/jacoco/test/jacocoTestReport.xml) — running a full verify\n==== VERIFY RED: backend ====' } : ok0(p, o)),
+  ({ result, calls }) => (result.status === 'STOPPED' && result.failing.some((f) => /^close: ==== VERIFY RED/.test(f)) && !parked(calls) ? 1 : 0));
+wf('workflow green: close = re-verify if needed → artifacts → coverage --update → commit → DONE → subStep none, in that order', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) => {
+  const c = calls.find((x) => CLOSE.test(x.prompt));
+  if (!c || result.status !== 'DONE') return 1;
+  const p = runnerCommand(c.prompt);
+  const at = ['verify.mjs" --reuse-if-fresh', 'check-artifacts.mjs" --step 04_build --slice 01_rooms --stage done', 'check-coverage.mjs" --update', 'commit.mjs" --message', 'slice 01_rooms DONE', 'set subStep none', 'ORACUL_EXIT'].map((x) => p.indexOf(x));
+  return at.every((v, i) => v >= 0 && (i === 0 || v > at[i - 1])) ? 0 : 1;
+});
 const between = (calls, from, to) => calls.slice(from + 1, to);
 wf('workflow green: stack busy once → rerun, no fix round, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(1), ({ result, calls }) => {
   const idx = calls.map((c, i) => (/stack\.mjs" e2e/.test(c.prompt) ? i : -1)).filter((i) => i >= 0);
@@ -716,7 +734,7 @@ const parked = (calls) => calls.some((c) => /checkout HEAD -- backend|slice 01_r
 const oneRoundNoTriage = (calls) => !calls.some((c) => /^triage/.test(c.opts.label || '')) && !calls.some((c) => / r2$/.test(c.opts.label || ''));
 wf('workflow red: E2E refused by the guard → STOPPED "e2e: blocked by guard hook", never triaged, one round, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/stack\.mjs" e2e/), ({ result, calls }) =>
   (result.status === 'STOPPED' && result.failing.includes('e2e: blocked by guard hook') && oneRoundNoTriage(calls) && !parked(calls) ? 1 : 0));
-wf('workflow red: verify refused by the guard → STOPPED "verify: blocked by guard hook", never triaged, one round, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(/checks\/verify\.mjs"/), ({ result, calls }) =>
+wf('workflow red: verify refused by the guard → STOPPED "verify: blocked by guard hook", never triaged, one round, not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), refuse(LOOP_VERIFY), ({ result, calls }) =>
   (result.status === 'STOPPED' && result.failing.includes('verify: blocked by guard hook') && oneRoundNoTriage(calls) && !parked(calls) ? 1 : 0));
 wf('workflow green: a real E2E failure is still triaged (not mistaken for a guard block)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
   let n = 0;
@@ -753,7 +771,7 @@ const noteCommands = async () => {
   let v = 0;
   await runWorkflow('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, phaseDir: dir, maxRounds: 2 }), (p, o) => {
     if (o.label?.startsWith('run: note')) cmds.push(runnerCommand(p));
-    return /checks\/verify\.mjs"/.test(p) ? { exitCode: 1, output: `verify RED #${++v}` } : ok0(p, o);
+    return LOOP_VERIFY.test(p) ? { exitCode: 1, output: `verify RED #${++v}` } : ok0(p, o);
   });
   return { dir, cmds: cmds.filter(Boolean) };
 };
@@ -828,7 +846,8 @@ for (const t of asyncTests) {
 
 // Replay: every command a workflow runs must pass the real guard hook in the subStep the workflow itself set before it
 // (the hook runs BEFORE a command, so a chained `set subStep x && …` is judged segment by segment).
-const NEEDS_TOOLS = /checks\/verify\.mjs"|bin\/stack\.mjs"|gradlew|red-check\.mjs"/;
+// verify --reuse-if-fresh takes its skip path in the sandbox (fresh GREEN lastVerify), so the close chain runs for real.
+const NEEDS_TOOLS = /checks\/verify\.mjs"(?! --reuse-if-fresh)|bin\/stack\.mjs"|gradlew|red-check\.mjs"/;
 const SHELL_ERROR = /syntax error|unexpected end of file|here-document .*delimited by end-of-file|command not found|unbound variable/;
 async function replayThroughHook(file, args, answer, source, { execute = false } = {}) {
   const sb = sandbox();
@@ -839,6 +858,7 @@ async function replayThroughHook(file, args, answer, source, { execute = false }
   }
   const blocked = [];
   const executed = [];
+  const closeOutputs = [];
   const { result } = await runWorkflow(file, { ...args, engine: ENGINE, root: sb.root, appDir: sb.appDir, phaseDir: sb.doc('') }, (p, o) => {
     if (o.label?.startsWith('run:')) {
       const cmd = runnerCommand(p);
@@ -856,13 +876,17 @@ async function replayThroughHook(file, args, answer, source, { execute = false }
           if (!rounds.includes(`## ${title}`) || /ORACUL_EO/.test(rounds)) blocked.push(`${o.label}: shell error: note did not land cleanly in rounds.md`);
         }
         else if (gate && !/ORACUL_EXIT=\d+\s*$/.test(out.trimEnd() + '\n')) blocked.push(`${o.label}: gate printed no ORACUL_EXIT as its last line`);
+        // The real close chain must succeed in the sandbox, reusing the round's verify (no extra time on a normal close).
+        if (o.label.startsWith('run: close ') && !(/ORACUL_EXIT=0\s*$/.test(out.trimEnd() + '\n') && /verify: reusing the full GREEN verify/.test(out)))
+          blocked.push(`${o.label}: close chain did not pass via the reuse path: ${out.trim().slice(-300)}`);
+        if (o.label.startsWith('run: close ')) closeOutputs.push(out);
       }
       for (const m of cmd.matchAll(/set subStep (\S+)/g)) sb.state({ subStep: m[1] });
     }
     return answer(p, o);
   }, source);
   fs.rmSync(sb.root, { recursive: true, force: true });
-  return { result, blocked, executed };
+  return { result, blocked, executed, closeOutputs };
 }
 const e2eFailsOnce = () => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: `E2E FAIL\n${BLOCK}` } : ok0(p, o)); };
 for (const [name, file, args] of [
@@ -886,8 +910,9 @@ for (const [name, file, args] of [
   let got, note = '';
   try {
     const r = await replayThroughHook(file, args, e2eFailsOnce(), undefined, { execute: true });
-    got = r.blocked.length || !r.executed.length ? 1 : 0;
-    note = r.blocked.join(' | ') || `${r.executed.length} commands executed`;
+    const needsClose = file === 'build-slice.js' && args.stage === 'green';
+    got = r.blocked.length || !r.executed.length || (needsClose && !r.closeOutputs.length) ? 1 : 0;
+    note = r.blocked.join(' | ') || `${r.executed.length} commands executed${needsClose ? ` · close: ${(r.closeOutputs[0] || 'NOT RUN').split('\n').find((l) => /reusing/.test(l)) || 'no reuse line'}` : ''}`;
   } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
 }
