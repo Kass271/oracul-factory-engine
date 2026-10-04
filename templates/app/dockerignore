@@ -1,0 +1,15 @@
+# Oracul: what never goes into an image. A small build context is sent fast, and changes to tests, specs, docs or the
+# E2E package do not invalidate the image layers (stack.mjs skips the rebuild when the image inputs are unchanged).
+.git
+**/.DS_Store
+**/node_modules
+**/.angular
+**/dist
+**/coverage
+backend/build
+backend/.gradle
+backend/src/test
+frontend/src/**/*.spec.ts
+e2e
+docs
+.oracul

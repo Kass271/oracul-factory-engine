@@ -71,6 +71,7 @@ Object.assign(vars, {
   DEP_MGMT_VERSION: initBuild.match(/io\.spring\.dependency-management"\) version "([^"]+)"/)[1],
   DEPENDENCIES: deps.split('\n').map((l) => `    ${l.trim()}`).join('\n'),
   OPENAPI_GEN_VERSION: latestGradlePlugin('org.openapi.generator', '7.25.0'),
+  TEST_RETRY_VERSION: latestGradlePlugin('org.gradle.test-retry', '1.6.2'),
   FOOJAY_VERSION: latestGradlePlugin('org.gradle.toolchains.foojay-resolver-convention', '1.0.0'),
   GRADLE_VERSION: (readText(path.join(ctx.appDir, 'backend/gradle/wrapper/gradle-wrapper.properties')).match(/gradle-([\d.]+)-bin/) || [])[1],
 });
@@ -82,10 +83,11 @@ function latestGradlePlugin(id, fallback) {
   return (r.out.match(/<release>([^<]+)<\/release>/) || [])[1] || fallback;
 }
 
-step('root files: api/openapi.yaml, docker-compose.yml, .gitignore');
+step('root files: api/openapi.yaml, docker-compose.yml, .gitignore, .dockerignore');
 overlay(path.join(T, 'app', 'api'), path.join(ctx.appDir, 'api'));
 fs.writeFileSync(path.join(ctx.appDir, 'docker-compose.yml'), fill(readText(path.join(T, 'app', 'docker-compose.yml'))));
 fs.writeFileSync(path.join(ctx.appDir, '.gitignore'), readText(path.join(T, 'app', 'gitignore')));
+fs.writeFileSync(path.join(ctx.appDir, '.dockerignore'), readText(path.join(T, 'app', 'dockerignore')));
 
 step('frontend: Angular CLI + Angular Material');
 vars.ANGULAR_VERSION = npmLatest('@angular/cli');

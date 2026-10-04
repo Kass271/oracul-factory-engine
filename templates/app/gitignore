@@ -13,3 +13,5 @@ e2e/report/
 e2e/test-results/
 e2e/report-scratch/
 e2e/test-results-scratch/
+e2e/report-focus/
+e2e/test-results-focus/

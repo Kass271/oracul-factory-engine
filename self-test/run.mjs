@@ -577,6 +577,22 @@ const JUNIT_PROPS = path.join(ENGINE, 'templates/app/backend/src/test/resources/
 const hasTestTimeout = (text) => /^\s*junit\.jupiter\.execution\.timeout\.default\s*=\s*\d+\s*s\s*$/m.test(text || '');
 test('template green: backend tests have a default per-test timeout', 0, () => ({ code: fs.existsSync(JUNIT_PROPS) && hasTestTimeout(fs.readFileSync(JUNIT_PROPS, 'utf8')) ? 0 : 1, out: '' }));
 test('template red: properties without the timeout line are reported', 1, () => ({ code: hasTestTimeout('junit.jupiter.execution.parallel.enabled = true\n# junit.jupiter.execution.timeout.default = 120 s\n') ? 0 : 1, out: '' }));
+// B1: retry plugin, small build context, cached Gradle layer with production code only
+const tpl = (rel) => fs.readFileSync(path.join(ENGINE, 'templates/app', rel), 'utf8');
+const hasRetry = (t) => /id\("org\.gradle\.test-retry"\) version "\{\{TEST_RETRY_VERSION\}\}"/.test(t) && /retry \{\s*maxRetries\.set\(1\)\s*failOnPassedAfterRetry\.set\(false\)\s*\}/.test(t);
+const cachedDockerfile = (t) => /RUN --mount=type=cache,target=\/root\/\.gradle \.\/gradlew bootJar/.test(t) && /COPY backend\/src\/main \.\/src\/main/.test(t) && !/^COPY backend \.\/backend$/m.test(t) && /^# syntax=docker\/dockerfile:1/.test(t);
+const IGNORE_NEEDS = ['**/node_modules', 'backend/build', 'backend/src/test', 'frontend/src/**/*.spec.ts', 'e2e', 'docs', '.git'];
+const ignoresAll = (t) => IGNORE_NEEDS.every((x) => t.split('\n').map((l) => l.trim()).includes(x));
+test('template green: backend build retries a failed test once (FLAKY, not blocking)', 0, () => ({ code: hasRetry(tpl('backend/build.gradle.kts')) ? 0 : 1, out: '' }));
+test('template red: a build file without the retry block is reported', 1, () => ({ code: hasRetry(tpl('backend/build.gradle.kts').replace(/retry \{[\s\S]*?\n    \}/, '')) ? 0 : 1, out: '' }));
+test('template green: backend Dockerfile caches Gradle and copies production code only', 0, () => ({ code: cachedDockerfile(tpl('backend/Dockerfile')) ? 0 : 1, out: '' }));
+test('template red: the old Dockerfile (whole backend, no cache) is reported', 1, () => ({ code: cachedDockerfile('FROM x\nCOPY api ./api\nCOPY backend ./backend\nRUN ./gradlew bootJar --no-daemon -q\n') ? 0 : 1, out: '' }));
+test('template green: .dockerignore keeps tests, specs, docs, e2e and build output out of the images', 0, () => ({ code: ignoresAll(tpl('dockerignore')) ? 0 : 1, out: '' }));
+test('template red: an ignore file without backend/src/test is reported', 1, () => ({ code: ignoresAll(tpl('dockerignore').replace('backend/src/test\n', '')) ? 0 : 1, out: '' }));
+test('template green: scaffold writes .dockerignore and resolves the retry plugin version', 0, () => {
+  const sc = fs.readFileSync(path.join(ENGINE, 'bin/scaffold.mjs'), 'utf8');
+  return { code: /'\.dockerignore'\), readText\(path\.join\(T, 'app', 'dockerignore'\)\)/.test(sc) && /TEST_RETRY_VERSION: latestGradlePlugin\('org\.gradle\.test-retry'/.test(sc) ? 0 : 1, out: '' };
+});
 test('template red: config without env support is rejected', 1, (sb) => ({ code: scratchSupported(sb.read('e2e/playwright.config.ts')) ? 0 : 1, out: '' }));
 const FAILED_REPORT = { suites: [{ title: 'rooms.spec.ts', file: 'rooms.spec.ts', specs: [{ title: 'FR-1 create room', file: 'rooms.spec.ts', tests: [{ status: 'unexpected', projectName: 'chromium',
   results: [{ status: 'failed', error: { message: '\u001b[31mError: expect(locator).toBeVisible() failed\u001b[39m\nLocator: getByTestId(\'room-row\')' },

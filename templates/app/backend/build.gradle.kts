@@ -4,6 +4,7 @@ plugins {
     id("org.springframework.boot") version "{{BOOT_VERSION}}"
     id("io.spring.dependency-management") version "{{DEP_MGMT_VERSION}}"
     id("org.openapi.generator") version "{{OPENAPI_GEN_VERSION}}"
+    id("org.gradle.test-retry") version "{{TEST_RETRY_VERSION}}"
 }
 
 group = "com.oracul"
@@ -61,6 +62,12 @@ tasks.jar { enabled = false }
 tasks.withType<Test> {
     useJUnitPlatform()
     finalizedBy(tasks.jacocoTestReport)
+    // Oracul: a test that fails once and passes on the retry is reported FLAKY (recorded, never blocking);
+    // a test that fails on both attempts fails the build.
+    retry {
+        maxRetries.set(1)
+        failOnPassedAfterRetry.set(false)
+    }
 }
 
 tasks.jacocoTestReport {

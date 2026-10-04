@@ -48,6 +48,10 @@ add('Docker daemon', docker.code === 0, docker.code === 0 ? `server ${docker.out
 const compose = run('docker', ['compose', 'version', '--short']);
 add('Docker Compose v2', compose.code === 0, compose.out.trim() || 'not found', 'update Docker Desktop');
 
+// The backend Dockerfile caches Gradle with RUN --mount (BuildKit, the default builder of current Docker Desktop).
+const buildx = run('docker', ['buildx', 'version']);
+add('Docker BuildKit (buildx)', buildx.code === 0, buildx.code === 0 ? buildx.out.trim().split('\n')[0] : 'not found', 'update Docker Desktop (BuildKit/buildx is included)');
+
 for (const [name, url] of [['start.spring.io', 'https://start.spring.io/metadata/client'], ['npm registry', 'https://registry.npmjs.org/']]) {
   const r = run('curl', ['-s', '-o', '/dev/null', '-m', '10', '-w', '%{http_code}', url]);
   add(`network: ${name}`, r.out.trim().startsWith('2'), `HTTP ${r.out.trim() || 'error'}`, 'check internet / proxy');

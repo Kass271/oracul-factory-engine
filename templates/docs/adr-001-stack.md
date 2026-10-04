@@ -11,7 +11,7 @@ Date: {{DATE}} · Status: accepted
 | Database | PostgreSQL + Flyway | postgres:18 |
 | Contract | OpenAPI 3 — openapi-generator (Spring interfaces), ng-openapi-gen (Angular client) | {{OPENAPI_GEN_VERSION}} / {{NG_OPENAPI_GEN_VERSION}} |
 | Frontend | Angular + Angular Material (Material 3) | {{ANGULAR_VERSION}} / {{MATERIAL_VERSION}} |
-| Unit tests | JUnit 5 + Testcontainers + JaCoCo · Angular unit-test builder (Vitest) | — |
+| Unit tests | JUnit 5 + Testcontainers + JaCoCo + Gradle test-retry (1 retry → FLAKY, never blocking) · Angular unit-test builder (Vitest) | {{TEST_RETRY_VERSION}} |
 | E2E | Playwright | {{PLAYWRIGHT_VERSION}} |
 | Runtime | Docker Compose (db · backend · frontend/nginx) | — |
 
