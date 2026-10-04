@@ -64,6 +64,7 @@ step('env-check --write', 0, () => sh('bin/env-check.mjs', ['--write']));
 step('scaffold (Initializr + Angular + Material + Playwright)', 0, () => sh('bin/scaffold.mjs'));
 step('Step 0 artifacts', 0, () => sh('checks/check-artifacts.mjs', ['--step', '00_setup']));
 step('Step 0 verify on the skeleton (Gradle + Testcontainers + Vitest)', 0, () => sh('checks/verify.mjs'));
+step('a fresh scaffold needs no migration (templates = migration target)', 0, () => sh('bin/migrate.mjs', ['--check']));
 step('commit skeleton', 0, () => sh('bin/commit.mjs', ['--message', `${PHASE} 00_setup: skeleton`]));
 
 // ---------------------------------------------------------------- Step 1
@@ -105,6 +106,10 @@ step('RED: guard blocks production code', 2, () => hook('guard-edits', W('backen
 step('RED: guard allows writing tests', 0, () => hook('guard-edits', W('backend/src/test/java/com/oracul/app/todos/TodosApiIT.java')));
 copy(path.join(SMOKE, 'red'), appDir);
 step('RED: red-check proves tests fail for the right reason', 0, () => sh('bin/red-check.mjs', ['--slice', '01_todos']));
+step('RED: red-check --scope slice runs only the related tests and agrees', 0, () => {
+  const r = sh('bin/red-check.mjs', ['--slice', '01_todos', '--scope', 'slice']);
+  return r.code === 0 && /\(related\) took/.test(r.out) && /^Scope: slice/m.test(fs.readFileSync(path.join(docs('04_build'), '01_todos', 'red-evidence.md'), 'utf8')) ? r : { code: r.code || 1, out: r.out };
+});
 
 sh('bin/state.mjs', ['set', 'subStep', 'green']);
 sh('bin/state.mjs', ['round', '+1']);
@@ -113,6 +118,31 @@ step('GREEN: guard blocks editing the contract', 2, () => hook('guard-edits', W(
 step('stop hook blocks while verify is stale', 2, () => hook('stop', { stop_hook_active: false }));
 copy(path.join(SMOKE, 'green'), appDir);
 step('GREEN: verify (backend + frontend + all checks)', 0, () => sh('checks/verify.mjs'));
+// A test that fails on its first attempt and passes on the retry (Gradle test-retry): verify stays GREEN and says FLAKY.
+step('FLAKY: a test that passes only on the retry → verify GREEN + FLAKY line + flaky.json', 0, () => {
+  const t = path.join(appDir, 'backend/src/test/java/com/oracul/app/FlakyOnceTest.java');
+  fs.writeFileSync(t, `package com.oracul.app;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.fail;
+
+class FlakyOnceTest {
+  @Test void failsOnlyOnTheFirstAttempt() throws Exception {
+    Path marker = Path.of("build", "oracul-flaky-once.marker");
+    if (!Files.exists(marker)) { Files.createDirectories(marker.getParent()); Files.createFile(marker); fail("first attempt"); }
+  }
+}
+`);
+  const v = sh('checks/verify.mjs');
+  fs.rmSync(t, { force: true });
+  fs.rmSync(path.join(appDir, 'backend/build/oracul-flaky-once.marker'), { force: true });
+  const flaky = JSON.parse(fs.readFileSync(path.join(root, 'state', 'apps', APP, 'flaky.json'), 'utf8'));
+  const ok = v.code === 0 && /FLAKY\s+com\.oracul\.app\.FlakyOnceTest\.failsOnlyOnTheFirstAttempt/.test(v.out) && Object.keys(flaky.tests).some((k) => /FlakyOnceTest/.test(k));
+  return ok ? v : { code: 1, out: v.out };
+});
+step('GREEN: verify again without the flaky test (clean reports for the close)', 0, () => sh('checks/verify.mjs'));
 
 sh('bin/state.mjs', ['set', 'subStep', 'review']);
 step('REVIEW: reviewer may not touch code', 2, () => hook('guard-edits', W('backend/src/main/java/com/oracul/app/todos/TodoEntity.java')));
@@ -156,6 +186,11 @@ step('E2E: guard allows up / detach / wait in subStep e2e', 0, () => {
   return { code: 0, out: '' };
 });
 step('E2E: Docker stack up (own call, under the lock)', 0, () => sh('bin/stack.mjs', ['up']));
+step('Docker: a second up after only a test change does not rebuild the images', 0, () => {
+  fs.appendFileSync(path.join(appDir, 'backend/src/test/java/com/oracul/app/todos/TodosApiIT.java'), '\n// smoke: test-only change\n');
+  const r = sh('bin/stack.mjs', ['up']);
+  return r.code === 0 && /images current — no rebuild/.test(r.out) ? r : { code: r.code || 1, out: r.out };
+});
 step('E2E: Playwright starts in a detached worker', 0, () => sh('bin/stack.mjs', ['e2e', '--detach']));
 step('E2E: e2e-wait until done (75 = still running) — PASS with screenshot evidence', 0, () => {
   let r;
@@ -163,6 +198,23 @@ step('E2E: e2e-wait until done (75 = still running) — PASS with screenshot evi
   return r.code === 0 && /E2E PASS/.test(r.out) ? r : { code: r.code || 1, out: r.out };
 });
 step('E2E: stack lock released after the detached run', 0, () => ({ code: fs.existsSync(path.join(root, 'state', 'apps', APP, 'stack.lock')) ? 1 : 0, out: 'stack.lock still present' }));
+step('E2E: the full run is recorded and covers exactly this code (check-e2e-fresh)', 0, () => sh('checks/check-e2e-fresh.mjs'));
+step('E2E: focus run of the slice (related specs only) — official report untouched', 0, () => {
+  const official = path.join(appDir, 'e2e', 'report', 'results.json');
+  const before = fs.readFileSync(official, 'utf8');
+  const r = sh('bin/stack.mjs', ['e2e', '--focus-slice', '01_todos', '--no-up']);
+  const ok = r.code === 0 && /FOCUS 01_todos: /.test(r.out) && /FOCUS E2E PASS/.test(r.out) && fs.readFileSync(official, 'utf8') === before
+    && fs.existsSync(path.join(appDir, 'e2e', 'report-focus', 'results.json'));
+  return ok ? r : { code: 1, out: r.out };
+});
+step('E2E: a production change makes the full run stale (check-e2e-fresh says no)', 1, () => {
+  const f = path.join(appDir, 'backend/src/main/resources/application.properties');
+  const orig = fs.readFileSync(f, 'utf8');
+  fs.appendFileSync(f, '\n# smoke\n');
+  const r = sh('checks/check-e2e-fresh.mjs');
+  fs.writeFileSync(f, orig);
+  return r;
+});
 step('gate sentinel in real bash: last line is ORACUL_EXIT=<status of the chain>', 0, () => {
   const cmd = `node "${path.join(ENGINE, 'checks', 'check-review.mjs')}" --release && git -C "${appDir}" status --short >/dev/null\necho "ORACUL_EXIT=$?"`;
   const x = spawnSync('bash', ['-c', cmd], { env, cwd: root, encoding: 'utf8' });

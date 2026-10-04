@@ -109,6 +109,23 @@ test('contract red: compile does not depend on generation', 1, (sb) => { sb.edit
 test('contract red: frontend test does not regenerate client', 1, (sb) => { sb.edit('frontend/package.json', '"pretest": "npm run generate:api",', ''); return node(sb, 'checks/check-contract.mjs'); });
 test('contract red: generated code missing', 1, (sb) => { sb.rm('frontend/src/app/api'); return node(sb, 'checks/check-contract.mjs', ['--require-generated']); });
 
+// WP-P: required + nullable is rejected where NON_NULL would drop the field; generator + null-convention defaults
+const SCHEMAS = (req, prop) => `components:\n  schemas:\n    Provider:\n      type: object\n      ${req}\n      properties:\n        name:\n          type: string\n        providerCode:\n${prop}\n`;
+const NULLABLE = '          type: string\n          nullable: true';
+const nonNullApp = (sb) => sb.put('backend/src/main/resources/application.properties', 'spring.jackson.default-property-inclusion=non_null\n');
+const withSchemas = (sb, req, prop) => sb.put('api/openapi.yaml', sb.read('api/openapi.yaml') + SCHEMAS(req, prop));
+test('contract red: required + nullable in an app with the null convention', 1, (sb) => { nonNullApp(sb); withSchemas(sb, 'required: [name, providerCode]', NULLABLE); return node(sb, 'checks/check-contract.mjs'); },
+  (sb, r) => /required \+ nullable: Provider\.providerCode/.test(r.out) || r.out);
+test('contract red: required (block list) + OpenAPI 3.1 type null', 1, (sb) => { nonNullApp(sb); withSchemas(sb, 'required:\n        - providerCode', "          type: [string, 'null']"); return node(sb, 'checks/check-contract.mjs'); });
+test('contract green: optional nullable is fine', 0, (sb) => { nonNullApp(sb); withSchemas(sb, 'required: [name]', NULLABLE); return node(sb, 'checks/check-contract.mjs'); });
+test('contract green: an app that writes nulls only gets a WARN', 0, (sb) => { withSchemas(sb, 'required: [name, providerCode]', NULLABLE); return node(sb, 'checks/check-contract.mjs'); },
+  (sb, r) => /WARN\s+required \+ nullable/.test(r.out) || r.out);
+const TPL_GRADLE = fs.readFileSync(path.join(ENGINE, 'templates/app/backend/build.gradle.kts'), 'utf8');
+const genDefaults = (t) => /"skipDefaultInterface" to "false"/.test(t) && /"generatedConstructorWithRequiredArgs" to "false"/.test(t);
+test('template green: new operations compile as 501 defaults; required fields do not change constructors', 0, () => ({ code: genDefaults(TPL_GRADLE) ? 0 : 1, out: '' }));
+test('template red: the old generator options are reported', 1, () => ({ code: genDefaults(TPL_GRADLE.replace('"skipDefaultInterface" to "false"', '"skipDefaultInterface" to "true"')) ? 0 : 1, out: '' }));
+test('template green: null optional fields are left out of the JSON', 0, () => ({ code: /^spring\.jackson\.default-property-inclusion=non_null$/m.test(fs.readFileSync(path.join(ENGINE, 'templates/app/backend/src/main/resources/application.properties'), 'utf8')) ? 0 : 1, out: '' }));
+
 // ---------------- review
 test('review green: slices + release', 0, (sb) => {
   const a = node(sb, 'checks/check-review.mjs');

@@ -21,6 +21,15 @@ docs/<phase>/...   factory documents
   - frontend: `npm run generate:api` (ng-openapi-gen) → `frontend/src/app/api/` → services `api/services/<tag>.service.ts`, models `api/models/*`. Runs automatically before build/test/start.
 - Generated code is never edited (hook-enforced) and not committed on the frontend (`.gitignore`).
 - Errors: every non-2xx response uses `#/components/schemas/ApiError` `{ code, message }`.
+- Null convention (new apps): null optional fields are left out of the JSON (`spring.jackson.default-property-inclusion=non_null`).
+  So a property is either required and never null, or optional (absent = null) — never `required` + `nullable`
+  (`check-contract` rejects it). A field a later phase adds therefore does not change existing responses.
+- Contract changes are additive where possible (new operations, new optional fields). A new operation compiles as a
+  generated default method answering 501 until a controller implements it. Renames/removals of schemas, properties or
+  enum values are declared in `contract-notes.md` as `Renamed: Old → New` (one per line) — the contract sync step uses
+  exactly these.
+- Generated enums stay at the boundary: map them to domain enums in the controller/mapper and never `switch`
+  exhaustively over a generated enum in domain code — a new enum value then fails a test, not the compile.
 
 ## Backend
 - Package by capability: `com.oracul.app.<capability>` with `XController implements XApi`, `XService`, `XRepository extends JpaRepository`, `X` entity, mapper methods entity ↔ generated model.

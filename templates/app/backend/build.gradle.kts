@@ -39,7 +39,10 @@ openApiGenerate {
             "useSpringBoot4" to "true",
             "useJakartaEe" to "true",
             "useTags" to "true",
-            "skipDefaultInterface" to "true",
+            // A new operation is a default method answering 501 (red for the right reason), not a compile error.
+            "skipDefaultInterface" to "false",
+            // A new required field does not change constructors existing code calls.
+            "generatedConstructorWithRequiredArgs" to "false",
             "openApiNullable" to "false",
             "documentationProvider" to "none",
             "annotationLibrary" to "none",

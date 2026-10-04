@@ -4,9 +4,12 @@
 //   2. backend generates Spring interfaces from it before compiling
 //   3. frontend generates the Angular client from it before build/test
 //   4. --require-generated: generated code exists and is newer than openapi.yaml (verify passes this after building)
+//   5. no property is both required and nullable when the app leaves null fields out of the JSON
+//      (spring.jackson.default-property-inclusion=non_null) — it would vanish from responses. Other apps: WARN only.
 import fs from 'node:fs';
 import path from 'node:path';
 import { Report, context, parseArgs, readJson, readText } from './lib/core.mjs';
+import { requiredNullable } from './lib/openapi.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -29,6 +32,14 @@ else {
     else if (ops.length < methods) r.invalid(`openapi.yaml: ${methods - ops.length} operation(s) without operationId`);
     else r.pass(`openapi.yaml valid (${ops.length} operations)`);
   }
+}
+
+if (spec !== null) {
+  const both = requiredNullable(spec);
+  const nonNull = /^\s*spring\.jackson\.default-property-inclusion\s*[=:]\s*non_null\s*$/im.test(readText(at('backend/src/main/resources/application.properties')) || '');
+  if (!both.length) r.pass('no property is both required and nullable');
+  else if (nonNull) r.invalid(`required + nullable: ${both.join(', ')} — with NON_NULL a null value disappears from the JSON; make it optional (absent = null) or non-null`);
+  else r.warn(`required + nullable: ${both.join(', ')} (allowed here: this app writes null fields)`);
 }
 
 const gradle = readText(at('backend/build.gradle.kts'));
