@@ -125,6 +125,12 @@ test('contract green: an app that writes nulls only gets a WARN', 0, (sb) => { w
 const TPL_GRADLE = fs.readFileSync(path.join(ENGINE, 'templates/app/backend/build.gradle.kts'), 'utf8');
 const genDefaults = (t) => /"skipDefaultInterface" to "false"/.test(t) && /"generatedConstructorWithRequiredArgs" to "false"/.test(t);
 test('template green: new operations compile as 501 defaults; required fields do not change constructors', 0, () => ({ code: genDefaults(TPL_GRADLE) ? 0 : 1, out: '' }));
+test('template green: template code builds generated models fluently (no required-args constructors exist)', 0, () => {
+  const bad = [];
+  const walkJ = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walkJ(p); else if (p.endsWith('.java') && /new (Ping|ApiError)\("/.test(fs.readFileSync(p, 'utf8'))) bad.push(p); } };
+  walkJ(path.join(ENGINE, 'templates/app/backend'));
+  return { code: bad.length ? 1 : 0, out: bad.join(', ') };
+});
 test('template red: the old generator options are reported', 1, () => ({ code: genDefaults(TPL_GRADLE.replace('"skipDefaultInterface" to "false"', '"skipDefaultInterface" to "true"')) ? 0 : 1, out: '' }));
 test('template green: null optional fields are left out of the JSON', 0, () => ({ code: /^spring\.jackson\.default-property-inclusion=non_null$/m.test(fs.readFileSync(path.join(ENGINE, 'templates/app/backend/src/main/resources/application.properties'), 'utf8')) ? 0 : 1, out: '' }));
 

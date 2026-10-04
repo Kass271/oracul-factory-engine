@@ -10,6 +10,6 @@ public class SystemController implements SystemApi {
 
     @Override
     public ResponseEntity<Ping> ping() {
-        return ResponseEntity.ok(new Ping("pong"));
+        return ResponseEntity.ok(new Ping().message("pong"));
     }
 }
