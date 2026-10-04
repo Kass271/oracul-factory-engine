@@ -351,6 +351,27 @@ test('verify red: --reuse-if-fresh runs a full verify when there was no verify y
 test('verify green: a newer file only in the generated client (frontend/src/app/api) is ignored', 0, (sb) => { touchLater(sb, 'frontend/src/app/api/rooms.service.ts'); return reuse(sb); },
   (sb, r) => /reusing the full GREEN verify/.test(r.out) || r.out);
 
+// ---------------- verify --related (A5): development loop only, never the slice gate
+test('verify green: --related runs only the related tests and skips coverage', 1, (sb) => { sb.state({ slice: '01_rooms', step: '04_build' }); return node(sb, 'checks/verify.mjs', ['--related']); },
+  (sb, r) => (/== backend: \.\/gradlew test jacocoTestReport --console=plain -q --tests com\.oracul\.app\.rooms\.RoomsApiIT ==/.test(r.out)
+    && /SKIP\s+frontend: no related tests/.test(r.out) && /SKIP\s+check-coverage: related tests only/.test(r.out) && /VERIFY \(related tests\) RED/.test(r.out)
+    && JSON.parse(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/state.json'), 'utf8')).lastVerify.related === true
+    && !fs.existsSync(lastRunFile(sb))) || r.out);
+test('verify red: --related without a slice is refused', 1, (sb) => node(sb, 'checks/verify.mjs', ['--related']), (sb, r) => /--slice <s> required/.test(r.out) || r.out);
+test('verify green: --related includes the tests that failed in the previous run', 1, (sb) => {
+  sb.state({ slice: '01_rooms', step: '04_build' });
+  sb.put('backend/src/test/java/com/oracul/app/other/OtherIT.java', 'class OtherIT {}');
+  sb.put('../../state/apps/fixture/last-failures.json', JSON.stringify({ files: ['backend/src/test/java/com/oracul/app/other/OtherIT.java'] }));
+  return node(sb, 'checks/verify.mjs', ['--related']);
+}, (sb, r) => /--tests com\.oracul\.app\.other\.OtherIT/.test(r.out) || r.out);
+test('verify red: --reuse-if-fresh never reuses a related-only GREEN verify', 1, (sb) => {
+  sb.state({ lastVerify: { at: new Date(Date.now() + 60_000).toISOString(), result: 'GREEN', failing: [], related: true } }); return reuse(sb);
+}, (sb, r) => /the last verify ran the related tests only — running a full verify/.test(r.out) || r.out);
+test('stop red: a related-only GREEN verify is not a finished build', 2, (sb) => {
+  sb.state({ step: '04_build', lastVerify: { at: new Date(Date.now() + 60_000).toISOString(), result: 'GREEN', failing: [], related: true } });
+  return hook(sb, 'stop', { stop_hook_active: false });
+});
+
 // ---------------- gen-traceability
 test('gen-traceability green: all FRs ✔', 0, (sb) => {
   sb.put('../../state/apps/fixture/last-run.json', JSON.stringify({ layers: { backend: { exit: 0 }, frontend: { exit: 0 } } }));
@@ -781,6 +802,16 @@ wf('workflow red: a builder prompt without the related-tests rule would be caugh
   const be = calls.find((c) => c.opts.label === 'backend: 01_rooms r1');
   return /run only the slice's tests/.test(be.prompt.replace("run only the slice's tests", '')) ? 0 : 1;
 });
+const verifyKinds = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: verify')).map((c) => (/verify\.mjs" --related --slice 01_rooms/.test(c.prompt) ? 'related' : 'full'));
+wf('workflow green: round 1 = full verify only; a fix round = related verify, then full verify', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
+  let n = 0;
+  return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o));
+})(), ({ result, calls }) => (result.status === 'DONE' && verifyKinds(calls).join(',') === 'full,related,full' ? 0 : 1));
+wf('workflow red: related verify RED in a fix round → triaged, no full verify in that round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }), (() => {
+  let n = 0;
+  return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' }
+    : /verify\.mjs" --related/.test(p) ? { exitCode: 1, output: '==== VERIFY (related tests) RED: backend ====' } : ok0(p, o));
+})(), ({ calls }) => (verifyKinds(calls).join(',') === 'full,related' && calls.some((c) => /^triage: verify \(related tests\)/.test(c.opts.label || '')) ? 1 : 0));
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
   const stripped = tester.prompt.replace(/red-check/g, 'xxx');

@@ -221,6 +221,18 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
   e2eFailures = ''
 
+  // Fix rounds check the related tests first (seconds to minutes); the full verify below is the slice gate.
+  if (rounds > 1) {
+    const rv = await sh(node('checks/verify.mjs', `--related --slice ${S}`), `verify related r${rounds}`, { gate: true })
+    if (infraReason(rv)) { stopped = { gate: 'verify', reason: infraReason(rv), output: rv.output }; break }
+    if (rv.exitCode !== 0) {
+      failing = ['verify']
+      feedback = `verify (related tests) is RED:\n${rv.output}`
+      work = await triage('verify (related tests)', rv.output, hints, rounds)
+      await note(`Round ${rounds}`, `- Trigger: verify (related tests) RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${rv.output.slice(-3000)}\n\`\`\``)
+      continue
+    }
+  }
   const v = await sh(node('checks/verify.mjs'), `verify r${rounds}`, { gate: true })
   if (infraReason(v)) { stopped = { gate: 'verify', reason: infraReason(v), output: v.output }; break }
   if (v.exitCode !== 0) {

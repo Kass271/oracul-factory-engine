@@ -16,6 +16,7 @@ if (!['04_build', '05_release'].includes(step)) process.exit(0);
 let reason = null;
 if (!lastVerify) reason = 'verify has never run for this app';
 else if (lastVerify.result !== 'GREEN') reason = `last verify is RED: ${(lastVerify.failing || []).join(', ')}`;
+else if (lastVerify.related) reason = 'the last verify ran the related tests only (not the full suite)';
 else {
   const at = Date.parse(lastVerify.at);
   const changed = ['backend/src', 'frontend/src', 'e2e/tests', 'api']
