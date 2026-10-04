@@ -1,6 +1,10 @@
 # Oracul factory fix plan — red gate, red-check diagnostics, startup failures, stack modes, model setup
 
-Status: **WAITING FOR APPROVAL** (revision 4, 2026-10-04). Nothing implemented yet.
+Status: **IMPLEMENTED** on branch `red-gate-fix` (commits P, F, G, K, H, I, M, Q — 2026-10-04), stacked on the speed-up.
+Decisions: all recommended (D1=A, D2, D3, D5, D6 yes; D7 Haiku runner). Builders run on medium effort (speed priority).
+Overlap with the speed-up: WP-K's isolation rerun runs in the full verify (red-check is scoped, D9); FLAKY stays its
+own class; migrate.mjs has sets `speed` and `contract`; the stack guard covers `.oracul/stack.json` only (compose files
+stay app config builders may edit; a new extra compose file without modes makes stack.mjs refuse).
 
 ## How to run this plan
 1. Pause app development at a clean point (section 0 below).
