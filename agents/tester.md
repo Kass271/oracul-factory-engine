@@ -31,10 +31,14 @@ A hook blocks production code and the contract while you work (subStep `red` or 
    integration test that walks the whole range (or every boundary class) and asserts the invariant for each value —
    one example per range is not enough. See `testing-rules` → "Ranges and invariants".
 7. **Self-check before you finish** (see `testing-rules` → "Self-check"): run
-   `node <engine>/bin/red-check.mjs --slice <slice>` yourself (Bash, foreground, timeout 600000). It must print
+   `node <engine>/bin/red-check.mjs --slice <slice> --scope slice` yourself (Bash, foreground, timeout 600000) — it
+   runs only the slice's related tests, so it takes a minute or two. **At most 3 runs.** It must print
    `RESULT: RED`. Then read **every** failure message and confirm it fails only because the behaviour is missing and
-   could pass once the code exists. Fix every NOT-RED / WRONG-REASON line and every test bug you find, rerun, repeat.
-   Older tests you did not touch must still pass — if one fails, your new tests leak state into it.
+   could pass once the code exists. Fix every NOT-RED / WRONG-REASON line and every test bug you find, rerun.
+   **Stop and report** (do not investigate further) when what is left is outside your control: production code that
+   does not compile (`Task :compileJava FAILED`), a FLAKY older test (it passed on retry), or a Spring context that
+   fails because production code is missing. Never poll with `sleep`; never run the full suite yourself — the slice
+   gate runs it.
 
 ## Fix rounds (subStep `test-fix`)
 In a fix round you get a list of tests that are broken (compile error, flaky timing, shared data) or contradict the

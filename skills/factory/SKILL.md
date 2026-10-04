@@ -90,7 +90,7 @@ Loop:
    1. `B` with `stage: "red"` — analyst spec delta (incl. `Changes earlier behaviour` and `Ranges & invariants` per FR)
       + tester writes the RED tests, updates superseded tests and self-checks them with red-check.
    2. Run it yourself with the Bash tool, foreground, `timeout: 600000` (never through an agent):
-      `node $E/bin/red-check.mjs --slice <next>` — it runs Gradle and the Angular tests and takes minutes.
+      `node $E/bin/red-check.mjs --slice <next> --scope slice` — it runs the slice's related tests (Gradle + Angular).
       If the Bash call itself times out, rerun it with `run_in_background: true` and wait for its completion
       notification. A timeout is never a pass; take the exit code from the finished command only.
       Your run is the gate; the tester's own run was only its self-check.

@@ -87,7 +87,9 @@ tester may verify an E2E repair with `stack.mjs e2e --scratch --grep <spec file>
 A spec line `Changes earlier behaviour: <old> → <new> (tests: <files>)` makes those tests outdated. The tester updates
 them in the RED step (they then fail until the builders deliver `<new>`). Keep the `@trace` tags and the assertion strength.
 red-check rejects the slice (NOT-RED) if a listed file is untouched, and (WRONG-REASON) if an older test the tester did
-**not** touch starts failing — production code did not change, so the new tests broke it.
+**not** touch starts failing — production code did not change, so the new tests broke it. With `--scope slice` the
+untouched older tests do not run in red-check; the slice gate's full verify runs them, and triage sends a broken one to
+the tester.
 
 ## Ranges and invariants
 For every spec line `Ranges & invariants: …` write one test that covers the whole domain, not one example.
@@ -115,7 +117,9 @@ Invariants ("sorted by rank", "count shown = items returned") are asserted over 
 No randomness: enumerate the values, so a failure is reproducible.
 
 ## Self-check (before the tester finishes the RED stage)
-Run `node <engine>/bin/red-check.mjs --slice <slice>` yourself. It must print `RESULT: RED`. It flags as WRONG-REASON:
+Run `node <engine>/bin/red-check.mjs --slice <slice> --scope slice` yourself — at most 3 times. It runs only the
+related tests (the slice's tagged tests, the tests its spec supersedes, the test files you changed); the slice gate
+runs the whole suite later. It must print `RESULT: RED`. It flags as WRONG-REASON:
 compile errors, Mockito misuse, a Spring context or TestBed that does not start, `expected:<8> but was:<8>` (same text,
 different type), and older untouched tests that now fail. Then read every failure message and ask, per test:
 "what is the smallest production change that makes this pass without touching the test?" If there is none, the test is

@@ -9,7 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ENGINE } from '../checks/lib/core.mjs';
-import { analyseRed } from '../checks/lib/red.mjs';
+import { analyseRed, renderEvidence } from '../checks/lib/red.mjs';
+import { relatedTests } from '../checks/lib/related.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
@@ -239,6 +240,52 @@ test('red red: frontend older spec broken by the new tests', 2, (sb) => {
   return fe(sb, ' FAIL  src/app/search/search.spec.ts > search\n FAIL  src/app/rooms/rooms.spec.ts > rooms > lists');
 });
 test('red red: frontend TestBed misses a provider', 2, (sb) => fe(sb, ' FAIL  src/app/search/search.spec.ts\nNullInjectorError: No provider for HttpClient!'));
+
+// ---------------- related tests + red-check --scope slice (A2)
+test('related green: tagged + superseded + changed tests, nothing unrelated', 0, (sb) => {
+  oldTest(sb);
+  sb.put('backend/src/test/java/com/oracul/app/other/OtherIT.java', 'class OtherIT {}');
+  sb.put('frontend/src/app/rooms/rooms.spec.ts', "describe('rooms', () => {});");
+  sb.edit(SPEC, '- Changes earlier behaviour: none', `- Changes earlier behaviour: 201 → 200 (tests: ${OLD})`);
+  const r = relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', changed: ['frontend/src/app/rooms/rooms.spec.ts'] });
+  const ok = r.backend.includes('backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java') && r.backend.includes(OLD)
+    && !r.backend.some((f) => /OtherIT/.test(f)) && r.frontend.join() === 'frontend/src/app/rooms/rooms.spec.ts'
+    && r.e2e.includes('e2e/tests/rooms.spec.ts') && !r.frontend.includes('frontend/src/app/search/search.spec.ts');
+  return { code: ok ? 0 : 1, out: JSON.stringify(r) };
+});
+test('related red: unknown slice → null', 1, (sb) => ({ code: relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '09_x' }) ? 0 : 1, out: '' }));
+test('related green: a changed file that no longer exists is left out', 0, (sb) => {
+  const r = relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', changed: ['backend/src/test/java/com/oracul/app/GoneIT.java'] });
+  return { code: r.backend.some((f) => /GoneIT/.test(f)) ? 1 : 0, out: JSON.stringify(r) };
+});
+test('red-check green: --scope slice runs only the related backend classes', 0, (sb) => {
+  oldTest(sb);
+  return node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'slice', '--dry-run']);
+}, (sb, r) => (/backend: \.\/gradlew test --console=plain --continue --tests com\.oracul\.app\.rooms\.RoomsApiIT/.test(r.out) && !/OldIT/.test(r.out)
+  && !fs.existsSync(sb.doc('04_build/01_rooms/red-evidence.md.new'))) || r.out);
+test('red-check green: --scope full (default) runs the whole layer', 0, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--dry-run']),
+  (sb, r) => (/backend: \.\/gradlew test --console=plain --continue\s*$/m.test(r.out) && !/--tests/.test(r.out)) || r.out);
+test('red-check green: frontend related specs use ng test --include', 0, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '02_search', '--scope', 'slice', '--dry-run']),
+  (sb, r) => /frontend: npm run test:ci --silent -- --include src\/app\/search\/search\.spec\.ts/.test(r.out) || r.out);
+test('red-check green: frontend without `ng test` runs in full and says so', 0, (sb) => {
+  sb.edit('frontend/package.json', /"test:ci": "[^"]*"/, '"test:ci": "vitest run"');
+  return node(sb, 'bin/red-check.mjs', ['--slice', '02_search', '--scope', 'slice', '--dry-run']);
+}, (sb, r) => (/frontend: npm run test:ci --silent\s+# frontend test:ci is not `ng test`/.test(r.out)) || r.out);
+test('red-check red: slice not in the plan', 1, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '09_nope', '--dry-run']));
+test('red-check red: unknown --scope', 1, (sb) => node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'some', '--dry-run']));
+test('red-check green: --dry-run writes no evidence', 0, (sb) => { sb.rm('docs/phase-01_mvp/04_build/01_rooms/red-evidence.md'); return node(sb, 'bin/red-check.mjs', ['--slice', '01_rooms', '--scope', 'slice', '--dry-run']); },
+  (sb) => !fs.existsSync(sb.doc('04_build/01_rooms/red-evidence.md')) || 'evidence written by a dry run');
+test('evidence green: "Scope: slice" line, RESULT last', 0, (sb) => {
+  roomsFails(sb);
+  const a = analyseRed({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', layers: { backend: { code: 1, out: 'BUILD FAILED' } }, changed: [] });
+  const md = renderEvidence(a, { slice: '01_rooms', frs: ['FR-1'], scope: 'slice' });
+  return { code: /^Scope: slice\b/m.test(md) && /RESULT: RED\n$/.test(md) ? 0 : 1, out: md };
+});
+test('evidence green: an old red-evidence.md without a Scope line still passes the artifact check', 0, (sb) => {
+  const f = 'docs/phase-01_mvp/04_build/01_rooms/red-evidence.md';
+  sb.put(f, sb.read(f).replace(/^Scope:.*\n/m, ''));
+  return node(sb, 'checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_rooms', '--stage', 'red']);
+});
 
 // ---------------- verify --reuse-if-fresh (slice close) — the fixture has no gradlew, so a FULL run fails with exit 1
 const lastRunFile = (sb) => path.join(sb.stateDir, 'apps/fixture/last-run.json');
@@ -674,6 +721,15 @@ wf('workflow green: stage red asks the tester for a red-check self-check and the
   const analyst = calls.find((c) => c.opts.label?.startsWith('analyst: spec'));
   return tester && /red-check\.mjs" --slice 01_rooms/.test(tester.prompt) && /Ranges & invariants/.test(tester.prompt)
     && analyst && /Changes earlier behaviour/.test(analyst.prompt) && /Ranges & invariants/.test(analyst.prompt) && /--stage spec/.test(analyst.prompt) ? 0 : 1;
+});
+wf('workflow green: tester self-check is scoped (--scope slice), capped at 3 runs, stops on causes it cannot fix', 0, wfArgs({ stage: 'red' }), ok0, ({ result, calls }) => {
+  const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
+  return /red-check\.mjs" --slice 01_rooms --scope slice/.test(tester.prompt) && /at most 3 runs/.test(tester.prompt) && /compileJava FAILED/.test(tester.prompt)
+    && /FLAKY/.test(tester.prompt) && /Never poll with sleep/.test(tester.prompt) && /--scope slice$/.test(result.next) ? 0 : 1;
+});
+wf('workflow red: an unscoped tester self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
+  const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
+  return /--scope slice/.test(tester.prompt.replace(/--scope slice/g, '')) ? 0 : 1;
 });
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));

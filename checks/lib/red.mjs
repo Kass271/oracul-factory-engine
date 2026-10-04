@@ -2,7 +2,7 @@
 // Pure over its inputs (layer outputs, JUnit XML reports, the changed-file list) so the self-test can drive it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { exists, readText } from './core.mjs';
+import { exists, readText, tail, today } from './core.mjs';
 import { collectTraces, parsePlan, parseSpecFrs } from './docs.mjs';
 
 const COMPILE = {
@@ -123,4 +123,25 @@ export function analyseRed({ appDir, phaseDir, slice, layers = {}, reportsDir, s
 
   const verdict = notRed.length ? 'NOT-RED' : wrong.length ? 'WRONG-REASON' : 'RED';
   return { verdict, layers: out, notRed, wrong, sliceTests, untagged: s.frs.filter((x) => !traces.get(x)), frs: s.frs };
+}
+
+// red-evidence.md. "Scope:" is an additive line (a file without it was a full run).
+export function renderEvidence(a, { slice, frs, scope = 'full' }) {
+  return [
+    `# Red evidence — ${slice}`,
+    '',
+    `Date: ${today()} · FRs: ${frs.join(', ')}`,
+    `Scope: ${scope}${scope === 'slice' ? ' (related tests only — the slice gate runs the full suite)' : ''}`,
+    '',
+    '## Tagged tests',
+    '',
+    ...a.sliceTests.map((t) => `- ${t.fr} → \`${t.rel}\` (${t.layer})`),
+    ...(a.untagged || []).map((f) => `- ${f} → MISSING: no test tagged "@trace ${f}"`),
+    '',
+    ...(a.notRed.length || a.wrong.length ? ['## Problems', '', ...a.notRed.map((p) => `- NOT-RED: ${p}`), ...a.wrong.map((p) => `- WRONG-REASON: ${p}`), ''] : []),
+    ...(a.flaky?.length ? ['## Flaky older tests (passed on retry — not blamed on this slice)', '', ...a.flaky.map((f) => `- FLAKY: ${f}`), ''] : []),
+    ...a.layers.map((l) => `## ${l.layer}\n\n- Command exit: ${l.code}\n- Classification: ${l.cls}\n\n\`\`\`\n${tail(l.out, 50)}\n\`\`\`\n`),
+    `RESULT: ${a.verdict}`,
+    '',
+  ].join('\n');
 }
