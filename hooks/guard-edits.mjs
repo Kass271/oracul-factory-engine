@@ -8,6 +8,9 @@
 //   - subStep test-fix: production code and api/openapi.yaml (tester repairs tests in a fix round)
 //   - subStep green:  tests and api/openapi.yaml (builders never change tests or the contract)
 //   - subStep review: anything outside docs/ (reviewer only reports)
+//   - .oracul/stack.json (stack modes): only in subStep spec (analyst) or between slices — which stack E2E tests is a
+//     spec decision, never something a builder or tester changes to get green. Compose files stay app config (builders
+//     may add env vars); a new extra compose file without declared modes makes stack.mjs refuse.
 //   - Bash, any subStep while an app is active: running Playwright directly (npx/pnpx/bunx, yarn/pnpm [exec],
 //     npm exec/x, node_modules/.bin, node …/cli.js, npm run/test in e2e/) or changing the Docker stack directly
 //     (docker compose up/down/…, docker stop/rm/…). E2E and the stack run only through stack.mjs (lock, evidence dirs).
@@ -112,6 +115,7 @@ const k = kind(rel);
 const sub = a.state.subStep;
 
 if (k === 'generated') block(`${rel} is generated from api/openapi.yaml — change the contract, never the generated code.`);
+if (k === 'stack' && !['spec', 'none'].includes(sub)) block(`${rel}: the stack modes (which stack E2E and the user start) are decided in the spec step by the analyst — not in subStep ${sub}.`);
 if (sub === 'sync' && (k === 'test' || k === 'contract')) block(`${rel}: CONTRACT SYNC — only production code may change, and only to compile again (marker stubs, declared renames). Tests belong to the tester, the contract to the analyst.`);
 if (sub === 'red' && k === 'prod') block(`${rel}: RED phase — only tests may be written now. Production code comes in the GREEN phase.`);
 if (sub === 'test-fix' && (k === 'prod' || k === 'contract')) block(`${rel}: TEST-FIX round — the tester repairs tests only. Production code belongs to the builders, the contract to the analyst.`);

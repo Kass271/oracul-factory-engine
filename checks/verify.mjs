@@ -139,6 +139,7 @@ check('check-traceability', related ? ['--slice', relatedSlice] : ['--scope', ar
 if (related) console.log('\nSKIP     check-coverage: related tests only — the full verify (slice gate) checks coverage');
 else check('check-coverage');
 check('check-contract', args.quick ? [] : ['--require-generated']);
+check('check-stack');
 if (stepIdx >= STEPS.indexOf('04_build')) check('check-review');
 for (const s of STEPS.slice(0, Math.min(stepIdx, STEPS.indexOf('04_build')))) check('check-artifacts', ['--step', s]);
 if (stepIdx >= STEPS.indexOf('04_build')) check('check-artifacts', ['--step', '04_build']);

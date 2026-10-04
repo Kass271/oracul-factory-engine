@@ -16,6 +16,7 @@ import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
 import { imageInputsHash } from '../checks/lib/hash.mjs';
+import { composeArgs } from '../checks/lib/stack.mjs';
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
 const SPEC = 'docs/phase-01_mvp/02_specs/rooms.md';
@@ -743,6 +744,10 @@ test('guard red: SYNC edits a test', 2, (sb) => { sb.state({ subStep: 'sync' });
 test('guard red: SYNC edits the contract', 2, (sb) => { sb.state({ subStep: 'sync' }); return hook(sb, 'guard-edits', W(sb.p('api/openapi.yaml'))); });
 test('guard red: SYNC runs the stack', 2, (sb) => bash(sb, 'sync', `node ${STACK} up`));
 
+test('guard red: GREEN changes the stack modes', 2, (sb) => { sb.state({ subStep: 'green' }); return hook(sb, 'guard-edits', W(sb.p('.oracul/stack.json'))); });
+test('guard green: the analyst writes the stack modes in the spec step', 0, (sb) => { sb.state({ subStep: 'spec' }); return hook(sb, 'guard-edits', W(sb.p('.oracul/stack.json'))); });
+test('guard green: a builder adds an env var to docker-compose.yml (app config)', 0, (sb) => { sb.state({ subStep: 'green' }); return hook(sb, 'guard-edits', W(sb.p('docker-compose.yml'))); });
+
 // ---------------- stack lock + scratch runs (no Docker: --dry-run stops before compose/Playwright)
 const LOCK = (sb) => path.join(sb.stateDir, 'apps/fixture/stack.lock');
 const putLock = (sb, pid, startedAt = new Date().toISOString()) => write(LOCK(sb), JSON.stringify({ pid, cmd: 'e2e', startedAt }));
@@ -919,6 +924,32 @@ test('rebuild green: only tests, specs and docs changed → no rebuild', 0, (sb)
 test('rebuild red: an unknown new file at the app root counts (fail-safe) → --build', 0, (sb) => { builtNow(sb); sb.put('nginx-extra.conf', 'x'); return upPlan(sb); },
   (sb, r) => /--build \(image inputs changed\)/.test(r.out) || r.out);
 test('rebuild green: --build forces a rebuild', 0, (sb) => { builtNow(sb); return node(sb, 'bin/stack.mjs', ['up', '--dry-run', '--build']); }, (sb, r) => /--build \(--build given\)/.test(r.out) || r.out);
+
+// ---------------- WP-I: stack modes the app declares (.oracul/stack.json)
+const STACKCFG = { project: 'fixture', modes: { e2e: { files: ['docker-compose.yml', 'docker-compose.e2e.yml'], profiles: ['stub'] }, run: { files: ['docker-compose.yml'], profiles: ['real'] } } };
+const withModes = (sb, cfg = STACKCFG) => { sb.put('docker-compose.e2e.yml', 'services: {}\n'); sb.put('.oracul/stack.json', JSON.stringify(cfg)); };
+test('stack modes green: e2e mode = its files and profiles; down = every mode + --remove-orphans', 0, () => {
+  const e = composeArgs(STACKCFG, 'up', 'e2e').join(' '), d = composeArgs(STACKCFG, 'down').join(' ');
+  return { code: e === '-p fixture -f docker-compose.yml -f docker-compose.e2e.yml --profile stub' && d === '-p fixture -f docker-compose.yml -f docker-compose.e2e.yml --profile stub --profile real' ? 0 : 1, out: `${e} | ${d}` };
+});
+test('stack modes green: up (default mode e2e) uses the e2e files and profile', 0, (sb) => { withModes(sb); return node(sb, 'bin/stack.mjs', ['up', '--dry-run']); },
+  (sb, r) => /docker compose -p fixture -f docker-compose\.yml -f docker-compose\.e2e\.yml --profile stub up -d --build/.test(r.out) || r.out);
+test('stack modes green: up --mode run uses the run files', 0, (sb) => { withModes(sb); return node(sb, 'bin/stack.mjs', ['up', '--mode', 'run', '--dry-run']); },
+  (sb, r) => (/docker compose -p fixture -f docker-compose\.yml --profile real up -d/.test(r.out) && !/e2e\.yml/.test(r.out)) || r.out);
+test('stack modes green: down covers every mode and removes orphans', 0, (sb) => { withModes(sb); return node(sb, 'bin/stack.mjs', ['down', '--dry-run']); },
+  (sb, r) => /docker compose -p fixture -f docker-compose\.yml -f docker-compose\.e2e\.yml --profile stub --profile real down --remove-orphans/.test(r.out) || r.out);
+test('stack modes green: no config, no extra files → exactly today\'s plain command', 0, (sb) => node(sb, 'bin/stack.mjs', ['up', '--dry-run']),
+  (sb, r) => /^DRY RUN \(lock held\): docker compose up -d --build \(no record of the built images\)$/m.test(r.out) || r.out);
+test('stack modes red: an extra compose file without declared modes → up refused (never guess the E2E stack)', 1, (sb) => { sb.put('docker-compose.e2e.yml', 'services: {}\n'); return node(sb, 'bin/stack.mjs', ['up', '--dry-run']); },
+  (sb, r) => (/extra compose file\(s\) docker-compose\.e2e\.yml but no \.oracul\/stack\.json/.test(r.out) && !fs.existsSync(LOCK(sb))) || r.out);
+test('stack modes red: …and the official E2E is refused too', 1, (sb) => { sb.put('docker-compose.override.yml', 'services: {}\n'); return node(sb, 'bin/stack.mjs', ['e2e', '--dry-run']); });
+test('stack modes red: a mode names a compose file that does not exist', 1, (sb) => { sb.put('.oracul/stack.json', JSON.stringify(STACKCFG)); return node(sb, 'bin/stack.mjs', ['up', '--dry-run']); },
+  (sb, r) => /docker-compose\.e2e\.yml does not exist/.test(r.out) || r.out);
+test('stack modes red: unknown --mode', 1, (sb) => node(sb, 'bin/stack.mjs', ['up', '--mode', 'prod', '--dry-run']));
+test('check-stack green: declared modes', 0, (sb) => { withModes(sb); return node(sb, 'checks/check-stack.mjs'); });
+test('check-stack green: plain docker-compose.yml', 0, (sb) => node(sb, 'checks/check-stack.mjs'));
+test('check-stack red: extra compose file without modes', 1, (sb) => { sb.put('docker-compose.e2e.yml', 'x'); return node(sb, 'checks/check-stack.mjs'); });
+test('check-stack red: config without an e2e mode', 1, (sb) => { withModes(sb, { modes: { run: { files: ['docker-compose.yml'] } } }); return node(sb, 'checks/check-stack.mjs'); });
 
 // lock library (async)
 const asyncTests = [];
@@ -1554,7 +1585,7 @@ for (const [name, cmd, want] of [
     let got, note = '';
     try {
       const src = fs.readFileSync(path.join(ENGINE, 'workflows', 'build-slice.js'), 'utf8');
-      const mutated = src.replace("`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up')}`", "node('bin/stack.mjs', 'up')");
+      const mutated = src.replace("`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up --mode e2e')}`", "node('bin/stack.mjs', 'up --mode e2e')");
       if (mutated === src) throw new Error('mutation did not apply — update this case');
       const r = await replayThroughHook('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, mutated);
       got = r.blocked.length ? 1 : 0; note = r.blocked[0] || 'nothing blocked';

@@ -117,7 +117,7 @@ async function e2eRun(label, { reuse = false } = {}) {
     return r
   }
   const fresh = reuse ? await sh(node('checks/check-e2e-fresh.mjs'), `${label}: last full run still covers the code?`, { gate: true }) : null
-  const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up')}`, `${label}: docker up`)
+  const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up --mode e2e')}`, `${label}: docker up`)
   if (up.exitCode !== 0) return { ...up, infra: infraReason(up) }
   if (fresh && fresh.exitCode === 0) return { exitCode: 0, output: `E2E reused — ${fresh.output}`, infra: null }
   const start = await retryBusy(node('bin/stack.mjs', 'e2e --detach'), `${label}: start Playwright`)

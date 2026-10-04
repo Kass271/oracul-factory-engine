@@ -59,4 +59,7 @@ Every test that proves a requirement carries a comment `// @trace FR-x` (several
   `e2e --scratch --grep <spec file | title pattern>` = the tester's scoped verification run (test-fix only); it writes
   `e2e/report-scratch/` + `e2e/test-results-scratch/`, needs `E2E_REPORT_DIR`/`E2E_OUTPUT_DIR` support in
   `e2e/playwright.config.ts`, and is never evidence. `--dry-run` checks preconditions + lock without Docker.
+- Stack modes: `.oracul/stack.json` (optional) declares mode `e2e` (what the factory's E2E tests) and `run` (what the
+  user starts) as compose files + profiles; `stack.mjs --mode e2e|run`. Extra compose files without it → `stack.mjs`
+  refuses. Written only by the analyst in the spec step.
 - `node factory-engine/bin/state.mjs show` — where we are

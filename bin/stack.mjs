@@ -3,8 +3,12 @@
 // a time; a second one waits --lock-wait seconds, then exits 3 "STACK BUSY". Never delete a live lock.
 //   up      docker compose up -d --build, then wait until backend health and frontend answer. The build is skipped when
 //           the image inputs (checks/lib/hash.mjs) equal those of the last successful up (stack-hash.json); --build forces it
-//   down    docker compose down
+//   down    docker compose down --remove-orphans over every mode; afterwards no container of the project may be left
+//           (leftovers are removed and reported)
 //   status  docker compose ps (no lock)
+//   --mode e2e|run   which stack (.oracul/stack.json, checks/lib/stack.mjs): e2e (default — what the workflows test)
+//           or run (what the user starts). Without a config: plain docker compose; extra compose files without a
+//           config → refused (exit 1) instead of guessing which stack E2E would hit.
 //   e2e     up (unless --no-up) + Playwright; screenshots → docs/<phase>/05_release/qa/screenshots;
 //           on failure prints the "E2E FAILURES" block last
 //   e2e --scratch --grep <spec file | title pattern>
@@ -32,12 +36,23 @@ import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackHashPa
 import { FOCUS, SCRATCH, e2eEnv, e2eFocus, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { e2eInputsHash, imageInputsHash } from '../checks/lib/hash.mjs';
 import { acquire, alive } from '../checks/lib/lock.mjs';
+import { STACK_CONFIG, composeArgs, extraComposeFiles, loadStackConfig, projectName } from '../checks/lib/stack.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
 const cmd = args._[0];
 if (!ctx.appDir) { console.error('stack: no active app'); process.exit(1); }
-const URLS = { frontend: 'http://localhost:4200', backend: 'http://localhost:8080/actuator/health' };
+const mode = typeof args.mode === 'string' ? args.mode : 'e2e';
+if (!['e2e', 'run'].includes(mode)) { console.error('stack: --mode must be e2e or run'); process.exit(1); }
+const stack = loadStackConfig(ctx.appDir);
+if (stack.problems.length) { for (const p of stack.problems) console.error(`stack: ${p}`); process.exit(1); }
+const stackCfg = stack.config;
+const URLS = { frontend: stackCfg?.urls?.frontend || 'http://localhost:4200', backend: stackCfg?.urls?.health || 'http://localhost:8080/actuator/health' };
+// Refuse to guess: extra compose files (e.g. docker-compose.e2e.yml) without declared modes.
+function ambiguity() {
+  const extra = stackCfg ? [] : extraComposeFiles(ctx.appDir);
+  return extra.length ? `extra compose file(s) ${extra.join(', ')} but no ${STACK_CONFIG} — the analyst declares the e2e and run modes; never run docker compose yourself` : null;
+}
 const scratch = !!args.scratch;
 const focusSlice = typeof args['focus-slice'] === 'string' ? args['focus-slice'] : null;
 const kind = scratch ? 'scratch' : focusSlice ? 'focus' : 'official';
@@ -47,8 +62,9 @@ const RUN = { status: e2eRunPath(appName, 'json'), log: e2eRunPath(appName, 'log
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readLog = () => { try { return fs.readFileSync(RUN.log, 'utf8'); } catch { return ''; } };
 
+const composeCmd = (action, a) => ['compose', ...composeArgs(stackCfg, action, mode), ...a];
 function compose(...a) {
-  const r = run('docker', ['compose', ...a], { cwd: ctx.appDir });
+  const r = run('docker', composeCmd(a[0], a), { cwd: ctx.appDir });
   if (r.code) { console.error(tail(r.out, 80)); process.exit(r.code === 3 ? 1 : r.code); }
   return r.out;
 }
@@ -74,13 +90,18 @@ function buildPlan() {
 async function up() {
   const t0 = Date.now();
   const plan = buildPlan();
-  console.log(`docker compose up -d${plan.build ? ' --build' : ''} … (${plan.why})`);
+  console.log(`docker ${composeCmd('up', ['up', '-d', ...(plan.build ? ['--build'] : [])]).join(' ')} … (${plan.why}; mode ${mode})`);
   compose('up', '-d', ...(plan.build ? ['--build'] : []));
   if (!(await waitUp())) {
     console.error('stack did not become healthy within 300s');
-    console.error(tail(run('docker', ['compose', 'logs', '--tail', '60'], { cwd: ctx.appDir }).out, 80));
+    console.error(tail(run('docker', composeCmd('logs', ['logs', '--tail', '60']), { cwd: ctx.appDir }).out, 80));
     process.exit(1);
   }
+  // Every service of the mode must be running (e.g. the stub of the e2e mode).
+  const want = compose('config', '--services').split('\n').map((x) => x.trim()).filter(Boolean);
+  const running = new Set(compose('ps', '--services', '--status', 'running').split('\n').map((x) => x.trim()).filter(Boolean));
+  const missing = want.filter((x) => !running.has(x));
+  if (missing.length) { console.error(`stack: services of mode ${mode} not running: ${missing.join(', ')}`); process.exit(1); }
   writeJson(stackHashPath(appName), { hash: plan.hash, at: new Date().toISOString() });
   console.log(`UP  frontend ${URLS.frontend}  ·  backend http://localhost:8080/api  ·  health ${URLS.backend}  (took ${took(Date.now() - t0)})`);
 }
@@ -149,16 +170,31 @@ async function waitRun(maxS) {
 
 switch (cmd) {
   case 'up': {
+    const amb = ambiguity();
+    if (amb) { console.error(`stack up: ${amb}`); process.exit(1); }
     const l = await locked('up');
-    if (args['dry-run']) { const p = buildPlan(); console.log(`DRY RUN (lock held): docker compose up -d${p.build ? ' --build' : ''} (${p.why})`); l.release(); process.exit(0); }
+    if (args['dry-run']) { const p = buildPlan(); console.log(`DRY RUN (lock held): docker ${composeCmd('up', ['up', '-d', ...(p.build ? ['--build'] : [])]).join(' ')} (${p.why})`); l.release(); process.exit(0); }
     await up();
     break;
   }
-  case 'down': await locked('down'); if (!args['dry-run']) { compose('down'); console.log('down'); } break;
+  case 'down': {
+    const l = await locked('down');
+    const cmdArgs = composeCmd('down', ['down', '--remove-orphans']);
+    if (args['dry-run']) { console.log(`DRY RUN (lock held): docker ${cmdArgs.join(' ')}`); l.release(); process.exit(0); }
+    compose('down', '--remove-orphans');
+    // Nothing of the project may be left (a container of a mode or profile the down did not cover).
+    const project = projectName(ctx.appDir, stackCfg);
+    const left = run('docker', ['ps', '-a', '-q', '--filter', `label=com.docker.compose.project=${project}`]).out.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (left.length) { run('docker', ['rm', '-f', ...left]); console.log(`down: removed ${left.length} leftover container(s) of project ${project}`); }
+    console.log('down');
+    break;
+  }
   case 'status': console.log(compose('ps')); break;
   case 'e2e-wait': await waitRun(args.max !== undefined ? Number(args.max) : 480); break;
   case 'e2e': {
     const bad = preconditions();
+    const amb = args['no-up'] ? null : ambiguity();
+    if (amb) bad.push(amb);
     if (args.detach && scratch) bad.push('--detach is for the official run only (scratch runs are scoped and short)');
     if (scratch && focusSlice) bad.push('--scratch and --focus-slice exclude each other');
     if (bad.length) { for (const b of bad) console.error(`stack e2e: ${b}`); process.exit(1); }
@@ -180,7 +216,7 @@ switch (cmd) {
     const pwArgs = ['playwright', 'test', ...(scratch ? filterArgs(args.grep) : focusSlice ? focusFiles : [])];
     const override = process.env.ORACUL_E2E_CMD ? JSON.parse(process.env.ORACUL_E2E_CMD) : null;
     if (args['dry-run']) {
-      console.log(`DRY RUN (lock held): ${args['no-up'] ? '' : 'docker compose up -d --build && '}npx ${pwArgs.join(' ')}`);
+      console.log(`DRY RUN (lock held): ${args['no-up'] ? '' : `docker ${composeCmd('up', ['up', '-d', '--build']).join(' ')} && `}npx ${pwArgs.join(' ')}`);
       console.log(Object.entries(env).map(([k, v]) => `  ${k}=${v}`).join('\n'));
       l.release();
       process.exit(0);

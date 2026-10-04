@@ -26,6 +26,7 @@ export function kind(rel) {
   if (/^frontend\/src\/app\/api\//.test(rel) || /^backend\/build\//.test(rel)) return 'generated';
   if (/^backend\/src\/test\//.test(rel) || /\.spec\.ts$/.test(rel) || /^e2e\/tests\//.test(rel)) return 'test';
   if (rel === 'api/openapi.yaml') return 'contract';
+  if (rel === '.oracul/stack.json') return 'stack';
   if (/^backend\/src\/main\//.test(rel) || /^frontend\/src\//.test(rel)) return 'prod';
   if (/^docs\//.test(rel)) return 'docs';
   return 'other';

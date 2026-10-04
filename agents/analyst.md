@@ -42,6 +42,10 @@ Every FR of the slice gets two more lines (a hook and `check-artifacts --stage s
   JSON field, `ApiError.code`, `data-testid`, ordering, count and outbound call this FR adds or changes, read the hits,
   and list each file whose assertion the new behaviour breaks (new sort order, extra calls, new required field, changed
   status…). The tester must update exactly these files in the RED stage; red-check rejects the slice if one is untouched.
+- Stack modes: if an FR changes how the Docker stack starts (extra compose files, profiles, stub vs real), write
+  `.oracul/stack.json` (format in `factory-engine/checks/lib/stack.mjs`): mode `e2e` = the stack the factory's E2E
+  tests (deterministic: stubs on), mode `run` = what the user starts. Only you write `stack.json`, in this step (hook-enforced);
+  `check-stack` validates it.
 - Contract changes: additive where possible (new operations, new optional fields). Declare every renamed schema,
   property or enum value in `contract-notes.md` as `Renamed: Old → New` (one line each) — the contract sync applies
   exactly these renames. Never `required` + `nullable` on one property (check-contract).

@@ -6,9 +6,11 @@ description: Start (or stop) the active Oracul app in Docker without rebuilding 
 # Run
 
 From `oracul/`:
-- start: `node factory-engine/bin/stack.mjs up` (builds images, waits for backend health + frontend)
-- stop: `node factory-engine/bin/stack.mjs down`
-- status: `node factory-engine/bin/stack.mjs status`
+- start: `node factory-engine/bin/stack.mjs up --mode run` (builds images when needed, waits for backend health + frontend)
+- stop: `node factory-engine/bin/stack.mjs down` (stops every mode)
+- status: `node factory-engine/bin/stack.mjs status --mode run`
+Mode `run` is what the app's `.oracul/stack.json` declares for users (e.g. real providers); without that file both modes
+are the plain docker-compose.yml. The factory's own E2E always uses mode `e2e`.
 
 On success answer with:
 ```
