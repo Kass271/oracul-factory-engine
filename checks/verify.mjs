@@ -2,14 +2,40 @@
 // The one command behind every gate: build + unit/integration tests of both layers, then all checks.
 //   --scope built|all   traceability scope (default built)
 //   --quick             skip builds/tests, run the checks only (uses existing reports)
+//   --reuse-if-fresh    (slice close) exit 0 at once if the last full GREEN verify still stands, else a normal full run
 // Writes state/apps/<app>/last-run.json and state.lastVerify. Exit 0 = GREEN, 1 = RED.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, STEPS, context, lastRunPath, loadState, parseArgs, run, saveState, tail, writeJson } from './lib/core.mjs';
+import { ENGINE, STEPS, context, lastRunPath, loadState, parseArgs, run, saveState, tail, walk, writeJson } from './lib/core.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
 if (!ctx.appDir) { console.error('verify: no app selected'); process.exit(1); }
+
+// --reuse-if-fresh: reuse the last full GREEN verify when nothing it measured can have changed since — no test or
+// coverage output and no source file is newer than it. A partial test run after it (e.g. the reviewer's
+// `gradlew test --tests X`) rewrites those reports from a subset; then this runs a full verify instead of letting the
+// close step read a false coverage drop. The skip path writes nothing.
+function staleReason() {
+  const lv = ctx.state?.lastVerify;
+  if (!lv) return 'no earlier verify';
+  if (lv.result !== 'GREEN') return `the last verify is ${lv.result}`;
+  if (lv.quick) return 'the last verify was --quick (no tests ran)';
+  const at = Date.parse(lv.at);
+  const rel = (p) => path.relative(ctx.appDir, p).split(path.sep).join('/');
+  const newer = (dirs, keep) => dirs.flatMap((d) => walk(path.join(ctx.appDir, d), (p) => keep(rel(p)))).find((p) => fs.statSync(p).mtimeMs > at);
+  const out = newer(['backend/build/test-results', 'backend/build/reports/jacoco', 'frontend/coverage'], () => true);
+  if (out) return `test/coverage output changed after it (${rel(out)})`;
+  const src = newer(['backend/src', 'frontend/src', 'e2e/tests', 'api'], (r) => !r.startsWith('frontend/src/app/api/'));
+  if (src) return `source changed after it (${rel(src)})`;
+  return null;
+}
+if (args['reuse-if-fresh']) {
+  const why = staleReason();
+  if (!why) { console.log(`verify: reusing the full GREEN verify of ${ctx.state.lastVerify.at}`); process.exit(0); }
+  console.log(`verify: ${why} — running a full verify`);
+}
+
 const pass = ['app', 'app-dir', 'phase'].flatMap((k) => (args[k] ? [`--${k}`, String(args[k])] : []));
 const failing = [];
 const layers = {};

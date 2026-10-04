@@ -239,6 +239,31 @@ test('red red: frontend older spec broken by the new tests', 2, (sb) => {
 });
 test('red red: frontend TestBed misses a provider', 2, (sb) => fe(sb, ' FAIL  src/app/search/search.spec.ts\nNullInjectorError: No provider for HttpClient!'));
 
+// ---------------- verify --reuse-if-fresh (slice close) — the fixture has no gradlew, so a FULL run fails with exit 1
+const lastRunFile = (sb) => path.join(sb.stateDir, 'apps/fixture/last-run.json');
+const touchLater = (sb, rel) => { const t = new Date(Date.now() + 3_600_000); if (!fs.existsSync(sb.p(rel))) sb.put(rel, 'x'); fs.utimesSync(sb.p(rel), t, t); };
+const reuse = (sb) => node(sb, 'checks/verify.mjs', ['--reuse-if-fresh']);
+test('verify green: --reuse-if-fresh reuses a full GREEN verify when nothing changed (writes nothing)', 0, (sb) => reuse(sb),
+  (sb, r) => (/verify: reusing the full GREEN verify of/.test(r.out) && !fs.existsSync(lastRunFile(sb))) || r.out);
+for (const [what, rel] of [
+  ['a coverage report', 'backend/build/reports/jacoco/test/jacocoTestReport.xml'],
+  ['a JUnit XML', 'backend/build/test-results/test/TEST-com.oracul.app.rooms.RoomsApiIT.xml'],
+  ['the frontend coverage', 'frontend/coverage/frontend/coverage-summary.json'],
+  ['a source file', 'backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java'],
+  ['the contract', 'api/openapi.yaml'],
+]) test(`verify red: --reuse-if-fresh runs a full verify when ${what} is newer than the last verify`, 1, (sb) => { touchLater(sb, rel); return reuse(sb); },
+  (sb, r) => (/running a full verify/.test(r.out) && r.out.includes(rel) && /VERIFY RED/.test(r.out)) || r.out);
+test('verify red: --reuse-if-fresh runs a full verify when the last verify was RED', 1, (sb) => {
+  sb.state({ lastVerify: { at: new Date(Date.now() + 60_000).toISOString(), result: 'RED', failing: ['x'] } }); return reuse(sb);
+}, (sb, r) => /the last verify is RED — running a full verify/.test(r.out) || r.out);
+test('verify red: --reuse-if-fresh runs a full verify when the last verify was --quick', 1, (sb) => {
+  sb.state({ lastVerify: { at: new Date(Date.now() + 60_000).toISOString(), result: 'GREEN', failing: [], quick: true } }); return reuse(sb);
+}, (sb, r) => /--quick \(no tests ran\) — running a full verify/.test(r.out) || r.out);
+test('verify red: --reuse-if-fresh runs a full verify when there was no verify yet', 1, (sb) => { sb.state({ lastVerify: null }); return reuse(sb); },
+  (sb, r) => /no earlier verify — running a full verify/.test(r.out) || r.out);
+test('verify green: a newer file only in the generated client (frontend/src/app/api) is ignored', 0, (sb) => { touchLater(sb, 'frontend/src/app/api/rooms.service.ts'); return reuse(sb); },
+  (sb, r) => /reusing the full GREEN verify/.test(r.out) || r.out);
+
 // ---------------- gen-traceability
 test('gen-traceability green: all FRs ✔', 0, (sb) => {
   sb.put('../../state/apps/fixture/last-run.json', JSON.stringify({ layers: { backend: { exit: 0 }, frontend: { exit: 0 } } }));
