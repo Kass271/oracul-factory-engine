@@ -469,6 +469,37 @@ test('slow report green: slowest classes and Spring context starts from the JUni
 });
 test('slow report green: no test results → empty, no error', 0, (sb) => { sb.rm('backend/build/test-results'); return { code: slowestClasses(sb.p('backend/build/test-results/test')).length ? 1 : 0, out: '' }; });
 
+// ---------------- migrate.mjs (B2): existing apps get what new apps are scaffolded with — only known text is patched
+const OLD_PW = "import { defineConfig, devices } from '@playwright/test';\n\n// Runs against the Docker stack (docker compose up). Reports feed gen-traceability and check-artifacts.\nexport default defineConfig({\n  testDir: './tests',\n  timeout: 30_000,\n  retries: 0,\n  reporter: [\n    ['list'],\n    ['json', { outputFile: 'report/results.json' }],\n    ['junit', { outputFile: 'report/junit.xml' }],\n  ],\n  use: { baseURL: process.env.BASE_URL ?? 'http://localhost:4200', trace: 'retain-on-failure' },\n  maxFailures: 10,\n});\n";
+const OLD_DF = "# build context = app root (needs api/openapi.yaml)\nFROM eclipse-temurin:25-jdk AS build\nWORKDIR /src\nCOPY api ./api\nCOPY backend ./backend\nWORKDIR /src/backend\nRUN ./gradlew bootJar --no-daemon -q\n\nFROM eclipse-temurin:25-jre\nWORKDIR /app\nCOPY --from=build /src/backend/build/libs/*.jar app.jar\nEXPOSE 8080\nENTRYPOINT [\"java\", \"-jar\", \"/app/app.jar\"]\n";
+const OLD_GRADLE = 'plugins {\n    java\n    id("org.openapi.generator") version "7.25.0"\n}\n\ntasks.withType<Test> {\n    useJUnitPlatform()\n    finalizedBy(tasks.jacocoTestReport)\n}\n';
+const oldApp = (sb) => { sb.put('e2e/playwright.config.ts', OLD_PW); sb.put('backend/Dockerfile', OLD_DF); sb.put('backend/build.gradle.kts', OLD_GRADLE); sb.put('.gitignore', 'node_modules/\n'); };
+const migrate = (sb, a = []) => { sb.env.ORACUL_TEST_RETRY_VERSION = '9.9.9'; return node(sb, 'bin/migrate.mjs', a); };
+test('migrate red: an old app has migrations pending → --check exit 10, nothing changed', 10, (sb) => { oldApp(sb); return migrate(sb, ['--check']); },
+  (sb, r) => (/MIGRATION PENDING \(5\)/.test(r.out) && sb.read('backend/Dockerfile') === OLD_DF) || r.out);
+test('migrate green: applies every item; the result is what new apps get', 0, (sb) => { oldApp(sb); return migrate(sb); }, (sb, r) => {
+  const pw = sb.read('e2e/playwright.config.ts'), g = sb.read('backend/build.gradle.kts');
+  const ok = scratchSupported(pw) && /maxFailures: 10/.test(pw) && /outputDir: process\.env\.E2E_OUTPUT_DIR \?\? 'test-results'/.test(pw)
+    && sb.read('backend/Dockerfile') === fs.readFileSync(path.join(ENGINE, 'templates/app/backend/Dockerfile'), 'utf8')
+    && /id\("org\.gradle\.test-retry"\) version "9\.9\.9"/.test(g) && /maxRetries\.set\(1\)/.test(g)
+    && fs.existsSync(sb.p('.dockerignore')) && /e2e\/report-focus\//.test(sb.read('.gitignore'));
+  return ok || r.out;
+});
+test('migrate green: a second run changes nothing and --check is clean', 0, (sb) => { oldApp(sb); migrate(sb); const snap = sb.read('backend/build.gradle.kts'); const c = migrate(sb, ['--check']); return { code: c.code === 0 && sb.read('backend/build.gradle.kts') === snap ? 0 : 1, out: c.out }; });
+test('migrate red: a customised Dockerfile is refused, not overwritten, and not asked again', 0, (sb) => {
+  oldApp(sb); sb.put('backend/Dockerfile', OLD_DF.replace('-q', '-q --info'));
+  const a = migrate(sb);
+  const c = migrate(sb, ['--check']);
+  return { code: /REFUSED\s+backend-dockerfile/.test(a.out) && /--info/.test(sb.read('backend/Dockerfile')) && c.code === 0 ? 0 : 1, out: a.out + c.out };
+});
+test('migrate red: a customised Playwright config (own outputDir) is refused', 0, (sb) => {
+  oldApp(sb); sb.put('e2e/playwright.config.ts', OLD_PW.replace("testDir: './tests',", "testDir: './tests',\n  outputDir: 'out',"));
+  const a = migrate(sb);
+  return { code: /REFUSED\s+playwright-report-dirs/.test(a.out) && /outputDir: 'out'/.test(sb.read('e2e/playwright.config.ts')) ? 0 : 1, out: a.out };
+});
+test('migrate red: refuses to run mid-slice', 1, (sb) => { oldApp(sb); sb.state({ subStep: 'green' }); return migrate(sb); }, (sb) => sb.read('backend/Dockerfile') === OLD_DF || 'changed mid-slice');
+test('migrate green: --check works mid-slice and changes nothing', 10, (sb) => { oldApp(sb); sb.state({ subStep: 'green' }); return migrate(sb, ['--check']); });
+
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 test('guard red: write into factory-engine', 2, (sb) => hook(sb, 'guard-edits', W(path.join(ENGINE, 'checks', 'verify.mjs'))));

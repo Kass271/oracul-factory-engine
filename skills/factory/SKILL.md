@@ -83,6 +83,10 @@ Tell the user the build now runs autonomously until the app is running.
 
 ## Step 4 — build (one slice at a time)
 Loop:
+0. Between slices, engine migrations first (deterministic, idempotent): `node $E/bin/migrate.mjs --check`.
+   Exit 10 → `node $E/bin/migrate.mjs && node $E/checks/verify.mjs && node $E/bin/commit.mjs --message "<phase> migrate: engine update"`.
+   Show the APPLIED / REFUSED lines in one short message (a REFUSED item needs a manual change; the build continues
+   without it). If verify is RED after a migration, stop and tell the user — do not start the next slice.
 1. `node $E/bin/state.mjs next-slice --json` → `{next, frs, skippedBecauseBlocked}`. `next` = null → Step 5.
 2. The slice runs in two workflow stages with red-check between them, which **you** run as a direct command.
    `B` = `scriptPath: <workflows.buildSlice>`, base args `{ engine, root, app, appDir, phase, phaseDir, slice: next, frs }`
