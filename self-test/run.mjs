@@ -1089,6 +1089,16 @@ test('integrity: plugin, agents, skills, hooks, workflows parse', 0, () => {
   return { code: problems.length ? 1 : 0, out: problems.join('\n') };
 });
 
+// ---------------- WP-Q: model policy — every agent has a model and an effort
+const POLICY = { analyst: 'opus/high', reviewer: 'opus/high', tester: 'sonnet/high', 'backend-builder': 'sonnet/medium', 'frontend-builder': 'sonnet/medium', 'qa-documenter': 'sonnet/medium' };
+const agentPolicy = (text) => { const m = (text.match(/^model: (\w+)$/m) || [])[1], e = (text.match(/^effort: (\w+)$/m) || [])[1]; return m && e ? `${m}/${e}` : null; };
+test('models green: every agent file names the model and effort of the policy', 0, () => {
+  const bad = Object.entries(POLICY).filter(([a, want]) => agentPolicy(fs.readFileSync(path.join(ENGINE, 'agents', `${a}.md`), 'utf8')) !== want).map(([a]) => a);
+  const extra = fs.readdirSync(path.join(ENGINE, 'agents')).filter((f) => !POLICY[f.replace(/\.md$/, '')]);
+  return { code: bad.length || extra.length ? 1 : 0, out: [...bad, ...extra].join(', ') };
+});
+test('models red: an agent file without effort is reported', 1, () => ({ code: agentPolicy('---\nname: x\nmodel: sonnet\n---\n') ? 0 : 1, out: '' }));
+
 // ---------------- workflows: build-slice stage contract (stub agents, no real commands)
 // The command inside a runner prompt: between `<fence>bash` and the same fence (the fence is longer than any backtick
 // run in the command).
@@ -1236,6 +1246,14 @@ wf('workflow green: unlisted older tests → the analyst lists them before the t
   const L = labelsOf(calls);
   const a = L.findIndex((l) => /^analyst: list older tests 01_rooms$/.test(l)), t = L.findIndex((l) => /^tester: red/.test(l));
   return a >= 0 && t > a && /OldIT\.java/.test(calls[a].prompt) ? 0 : 1;
+});
+const unmodelled = (calls) => calls.filter((c) => !c.opts.model || !c.opts.effort).map((c) => c.opts.label || '?');
+wf('models green: every agent call of a green stage with fix rounds and a failure names model + effort', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }),
+  (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)), ({ result, calls }) => (result.status === 'BLOCKED' && !unmodelled(calls).length ? 0 : 1));
+wf('models green: every agent call of a red stage with a contract sync names model + effort', 0, wfArgs({ stage: 'red' }), syncAnswer({ unlisted: true }), ({ calls }) => (!unmodelled(calls).length ? 0 : 1));
+wf('models green: triage runs on opus/high and the tester on sonnet/high, whatever the session model', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: '', tests: [{ file: 'e2e/tests/rooms.spec.ts', problem: 'x' }] }), ({ calls }) => {
+  const t = calls.find((c) => /^triage/.test(c.opts.label || '')), te = calls.find((c) => /^tester: fix/.test(c.opts.label || ''));
+  return t?.opts.model === 'opus' && t?.opts.effort === 'high' && te?.opts.model === 'sonnet' && te?.opts.effort === 'high' ? 0 : 1;
 });
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
@@ -1424,6 +1442,33 @@ for (const [name, expectCode, answer, problem] of [
     if (!got) note = JSON.stringify(result).slice(0, 300);
   } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
+}
+{
+  const name = 'models green: every agent call of the release (with a fix round) names model + effort';
+  if (!filter || name.includes(filter)) {
+    let got, note = '';
+    try {
+      let n = 0;
+      const { calls } = await runWorkflow('finish-and-run.js', relArgs, (p, o) => (/checks\/verify\.mjs" --scope all/.test(p) && !n++ ? { exitCode: 1, output: 'RED' } : ok0(p, o)));
+      const bad = unmodelled(calls);
+      got = bad.length ? 1 : 0; note = bad.join(', ');
+    } catch (e) { got = 'ERR'; note = String(e); }
+    results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
+  }
+}
+{
+  const name = 'models red: a triage call without a model would be caught';
+  if (!filter || name.includes(filter)) {
+    let got, note = '';
+    try {
+      const src = fs.readFileSync(path.join(ENGINE, 'workflows', 'build-slice.js'), 'utf8');
+      const mutated = src.replace("schema: TRIAGE_SCHEMA, model: 'opus', effort: 'high' })", 'schema: TRIAGE_SCHEMA })');
+      if (mutated === src) throw new Error('mutation did not apply — update this case');
+      const { calls } = await runWorkflow('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: 'x', tests: [] }), mutated);
+      got = unmodelled(calls).some((l) => /^triage/.test(l)) ? 1 : 0;
+    } catch (e) { got = 'ERR'; note = String(e); }
+    results.push({ name, ok: got === 1, expectCode: 1, got, note, out: '' });
+  }
 }
 for (const [name, expectCode, answer] of [
   ['workflow red: release verify refused by the guard → stops early: no E2E, no QA, no release commit', 1, () => refuse(/checks\/verify\.mjs" --scope all/)],

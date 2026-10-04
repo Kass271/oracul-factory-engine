@@ -92,8 +92,11 @@ async function runOnce(cmd, label) {
   )
   return res || { exitCode: 1, output: 'runner returned nothing' }
 }
+// Model policy (AGENTS.md): every agent call names its model and effort — nothing depends on the session's model.
+const ROLE_MODEL = { analyst: ['opus', 'high'], reviewer: ['opus', 'high'], tester: ['sonnet', 'high'], 'backend-builder': ['sonnet', 'medium'], 'frontend-builder': ['sonnet', 'medium'], 'qa-documenter': ['sonnet', 'medium'] }
+const modelOf = (name) => { const [model, effort] = ROLE_MODEL[name] || ['sonnet', 'medium']; return { model, effort } }
 async function role(name, prompt, label, schema) {
-  const opts = schema ? { label, schema } : { label }
+  const opts = { ...(schema ? { label, schema } : { label }), ...modelOf(name) }
   try {
     const r = await agent(prompt, { ...opts, agentType: `${NS}:${name}` })
     if (r !== null) return r
@@ -139,7 +142,7 @@ let hints = [] // tests the builders flagged as possibly wrong in the last fix r
 
 // Decide who fixes a failing gate: the tester (test is broken or contradicts the spec) or the builders (code).
 async function triage(gate, output, round) {
-  const t = await agent(`${CTX}\n\nThe ${gate} gate of the release failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n- verify labels older failing tests: FALLOUT = fails on its own (a production/contract change broke it: TEST if a spec changed that behaviour, else CODE); LEAK = passes on its own (other tests leak state: TEST). FLAKY lines are informational — never a reason for a fix.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), layers = which builders that code fix needs ("backend", "frontend" or both; leave empty if unsure), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} r${round}`, schema: TRIAGE_SCHEMA })
+  const t = await agent(`${CTX}\n\nThe ${gate} gate of the release failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n- verify labels older failing tests: FALLOUT = fails on its own (a production/contract change broke it: TEST if a spec changed that behaviour, else CODE); LEAK = passes on its own (other tests leak state: TEST). FLAKY lines are informational — never a reason for a fix.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), layers = which builders that code fix needs ("backend", "frontend" or both; leave empty if unsure), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} r${round}`, schema: TRIAGE_SCHEMA, model: 'opus', effort: 'high' })
   if (!t || (!t.code && !t.tests.length)) return { code: `${gate} is RED:\n${output}`, tests: [] }
   return t
 }

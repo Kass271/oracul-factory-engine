@@ -1,6 +1,6 @@
 {
   "name": "oracul",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Oracul factory: turns an idea into a running Java 25 + Spring Boot + Angular Material app through a clarify dialog, contract-first specs, test-first slices, independent review, script-verified artifacts and QA docs. Trigger: \"Start new phase development\".",
   "author": { "name": "oracul" },
   "keywords": ["factory", "spring-boot", "angular", "spec-driven", "multi-agent"]

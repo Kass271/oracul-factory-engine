@@ -21,12 +21,15 @@ workflows/    build-slice.js (Step 4, stage red | green — red-check runs betwe
 hooks/        hooks.json + session-start · guard-edits (Playwright/Docker only via stack.mjs; official E2E only in subStep e2e)
               post-edit · subagent-stop · stop
 checks/       verify (--related = development loop) + check-traceability · check-coverage · check-contract · check-review
-              check-artifacts · check-e2e-fresh (last full E2E covers the code; slice close) · gen-traceability
+              check-artifacts · check-e2e-fresh (last full E2E covers the code; slice close) · check-sync (contract sync
+              adds no behaviour; --release: no marker left) · check-stack (stack modes) · gen-traceability
               manifest/artifacts.manifest.json
               lib/ (core, docs parsers, red analysis + FLAKY, lock = stack lock, e2e = scratch/focus env + failure block,
-              related = related tests of a slice, timing = subStep timings + slowest tests, hash = image/E2E inputs)
+              related = related tests of a slice + FALLOUT/LEAK, timing = subStep timings + slowest tests, hash = image/E2E
+              inputs, compile = compile-only runs + labels, openapi = contract readers, stack = stack modes)
 bin/          state.mjs (only state writer; timings, flaky) · env-check · scaffold · red-check (--scope slice) · commit
-              migrate (existing apps → current scaffold, at slice boundaries)
+              compile-check (compile only, labelled diagnostics; contract sync + older-test listing)
+              migrate (existing apps → current scaffold, at slice boundaries; sets speed, contract)
               stack (Docker + E2E; up/down/e2e hold the stack lock; up skips the build when image inputs are unchanged;
               e2e --detach + e2e-wait = official run beyond the 10-min runner limit; e2e --scratch = tester's scoped run;
               e2e --focus-slice = a fix round's related specs)
@@ -34,6 +37,18 @@ templates/    app/ (skeleton overlay) · docs/ (one template per step document)
 self-test/    run.mjs + fixtures/app-green (red cases are mutations of the green fixture)
 state/        runtime state of generated apps (gitignored)
 ```
+
+## Model policy
+| Who | Model | Effort |
+|---|---|---|
+| analyst, reviewer | opus | high |
+| triage (decides code vs test) | opus | high |
+| tester | sonnet | high |
+| backend-builder, frontend-builder (also in sync) | sonnet | medium |
+| qa-documenter, failure note | sonnet | medium |
+| command runner (one shell command per call) | haiku | low |
+Set in `agents/*.md` (model, effort) and in the workflows' `ROLE_MODEL` / agent options — every agent call names its
+model, so nothing depends on the session's model. The integrity self-test enforces it.
 
 ## Speed principle
 Related tests while developing (red-check --scope slice, verify --related, builder loops, focus E2E); the whole suite

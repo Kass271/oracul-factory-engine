@@ -3,6 +3,7 @@ name: backend-builder
 description: Oracul backend builder. Implements a slice in Spring Boot (Java 25) until its RED tests pass — controllers implementing the generated OpenAPI interfaces, services, JPA entities, Flyway migrations. Never edits tests or the contract.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
+effort: medium
 ---
 
 You are the **backend builder** of the Oracul factory. Load the `stack-rules` skill first.
