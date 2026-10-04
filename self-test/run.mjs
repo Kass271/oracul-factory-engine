@@ -602,8 +602,17 @@ const OLD_DF = "# build context = app root (needs api/openapi.yaml)\nFROM eclips
 const OLD_GRADLE = 'plugins {\n    java\n    id("org.openapi.generator") version "7.25.0"\n}\n\ntasks.withType<Test> {\n    useJUnitPlatform()\n    finalizedBy(tasks.jacocoTestReport)\n}\n';
 const oldApp = (sb) => { sb.put('e2e/playwright.config.ts', OLD_PW); sb.put('backend/Dockerfile', OLD_DF); sb.put('backend/build.gradle.kts', OLD_GRADLE); sb.put('.gitignore', 'node_modules/\n'); };
 const migrate = (sb, a = []) => { sb.env.ORACUL_TEST_RETRY_VERSION = '9.9.9'; return node(sb, 'bin/migrate.mjs', a); };
-test('migrate red: an old app has migrations pending → --check exit 10, nothing changed', 10, (sb) => { oldApp(sb); return migrate(sb, ['--check']); },
+test('migrate red: an old app has migrations pending → --check exit 10, nothing changed', 10, (sb) => { oldApp(sb); return migrate(sb, ['--check', '--speed']); },
   (sb, r) => (/MIGRATION PENDING \(5\)/.test(r.out) && sb.read('backend/Dockerfile') === OLD_DF) || r.out);
+const OLD_GEN = 'openApiGenerate {\n    configOptions.set(mapOf("interfaceOnly" to "true", "skipDefaultInterface" to "true"))\n}\n';
+test('migrate red: contract set pending on an old app (default methods, marker files)', 10, (sb) => { sb.put('backend/build.gradle.kts', OLD_GEN); return migrate(sb, ['--check', '--contract']); },
+  (sb, r) => (/default-interface/.test(r.out) && /marker-java/.test(r.out) && /marker-ts/.test(r.out)) || r.out);
+test('migrate green: contract set — 501 defaults on, marker files from the templates, nothing else changed', 0, (sb) => { sb.put('backend/build.gradle.kts', OLD_GEN); return migrate(sb, ['--contract']); }, (sb, r) => {
+  const ok = /"skipDefaultInterface" to "false"/.test(sb.read('backend/build.gradle.kts')) && /"interfaceOnly" to "true"/.test(sb.read('backend/build.gradle.kts'))
+    && sb.read('backend/src/main/java/com/oracul/app/common/NotImplementedException.java') === fs.readFileSync(path.join(ENGINE, 'templates/app/backend/src/main/java/com/oracul/app/common/NotImplementedException.java'), 'utf8')
+    && fs.existsSync(sb.p('frontend/src/app/not-implemented.ts')) && !fs.existsSync(sb.p('backend/src/main/resources/application.properties'));
+  return ok || r.out;
+});
 test('migrate green: applies every item; the result is what new apps get', 0, (sb) => { oldApp(sb); return migrate(sb); }, (sb, r) => {
   const pw = sb.read('e2e/playwright.config.ts'), g = sb.read('backend/build.gradle.kts');
   const ok = scratchSupported(pw) && /maxFailures: 10/.test(pw) && /outputDir: process\.env\.E2E_OUTPUT_DIR \?\? 'test-results'/.test(pw)

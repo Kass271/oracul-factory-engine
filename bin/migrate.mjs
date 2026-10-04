@@ -2,7 +2,8 @@
 // One-time migrations of an EXISTING app to what the current engine scaffolds for new apps. Deterministic, idempotent,
 // only between slices (subStep none). Each item patches only text it knows; a customised file is refused — printed with
 // the manual change and recorded in state/apps/<app>/migrations.json, so --check does not ask again.
-//   (no flag) | --speed   apply the pending items (all sets | the speed set)
+//   (no flag) | --speed | --contract   apply the pending items (all sets | one set)
+//   Not migrated on purpose (they change behaviour or existing code): the null convention and required-args constructors.
 //   --check               exit 10 when an item is pending (not applied, not refused before), else 0 — changes nothing
 //   --dry-run             print what would change, change nothing
 // The orchestrator runs `--check` at every slice boundary; on 10 it applies, runs verify and commits.
@@ -87,10 +88,28 @@ const ITEMS = [
     pending: () => exists(at('.gitignore')) && !readText(at('.gitignore')).includes('e2e/report-focus/'),
     apply: () => { fs.appendFileSync(at('.gitignore'), `${readText(at('.gitignore')).endsWith('\n') ? '' : '\n'}e2e/report-focus/\ne2e/test-results-focus/\n`); return 'appended'; },
   },
+  {
+    id: 'default-interface', set: 'contract', what: 'generated interfaces get 501 default methods (a new operation no longer breaks the compile)',
+    pending: () => /"skipDefaultInterface" to "true"/.test(readText(at('backend/build.gradle.kts')) || ''),
+    apply: () => {
+      const t = readText(at('backend/build.gradle.kts'));
+      if ((t.match(/"skipDefaultInterface" to "true"/g) || []).length !== 1) return { refused: 'backend/build.gradle.kts: set "skipDefaultInterface" to "false" in openApiGenerate configOptions by hand' };
+      fs.writeFileSync(at('backend/build.gradle.kts'), t.replace('"skipDefaultInterface" to "true"', '"skipDefaultInterface" to "false"'));
+      return 'patched';
+    },
+  },
+  ...[
+    ['marker-java', 'backend/src/main/java/com/oracul/app/common/NotImplementedException.java', 'backend'],
+    ['marker-ts', 'frontend/src/app/not-implemented.ts', 'frontend'],
+  ].map(([id, rel, dir]) => ({
+    id, set: 'contract', what: `contract sync marker ${rel}`,
+    pending: () => exists(at(dir)) && !exists(at(rel)),
+    apply: () => { fs.mkdirSync(path.dirname(at(rel)), { recursive: true }); fs.writeFileSync(at(rel), readText(path.join(T, rel))); return 'written'; },
+  })),
 ];
 
 if (!ctx.appDir || !ctx.app) { console.error('migrate: no active app'); process.exit(1); }
-const sets = ['speed'].filter((x) => args[x]);
+const sets = ['speed', 'contract'].filter((x) => args[x]);
 const items = ITEMS.filter((i) => !sets.length || sets.includes(i.set));
 const rec = readJson(migrationsPath(ctx.app), { applied: {}, refused: {} });
 const pending = items.filter((i) => !rec.refused?.[i.id] && i.pending());
