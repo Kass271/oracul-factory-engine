@@ -875,6 +875,28 @@ wf('workflow green: close checks the E2E freshness right after the verify reuse'
   const a = p.indexOf('verify.mjs" --reuse-if-fresh'), b = p.indexOf('check-e2e-fresh.mjs" --allow-missing'), d = p.indexOf('check-artifacts.mjs');
   return a >= 0 && b > a && d > b ? 0 : 1;
 });
+const buildersIn = (calls, r) => calls.filter((c) => new RegExp(`^(backend|frontend): 01_rooms r${r}$`).test(c.opts.label || '')).map((c) => c.opts.label.split(':')[0]).sort().join(',');
+const triageSays = (answer) => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : o.label?.startsWith('triage') ? answer : ok0(p, o)); };
+wf('workflow green: triage says backend → only the backend builder runs the fix round', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: 'fix the 500', layers: ['backend'], tests: [] }),
+  ({ result, calls }) => (result.status === 'DONE' && buildersIn(calls, 1) === 'backend,frontend' && buildersIn(calls, 2) === 'backend' ? 0 : 1));
+wf('workflow green: triage unsure (no layers) → both builders', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: 'fix it', tests: [] }),
+  ({ calls }) => (buildersIn(calls, 2) === 'backend,frontend' ? 0 : 1));
+wf('workflow red: a frontend-only fix that started the backend builder would be caught', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: 'fix the label', layers: ['frontend'], tests: [] }),
+  ({ calls }) => (buildersIn(calls, 2) === 'frontend' ? 1 : 0));
+wf('workflow green: review finding on a backend file → only the backend builder', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
+  let reviews = 0;
+  return (p, o) => {
+    if (/check-review/.test(p)) return { exitCode: reviews > 1 ? 0 : 1, output: 'INVALID open' };
+    if (o.label?.startsWith('reviewer')) { reviews++; return { open: [{ id: 'R1', severity: 'high', dimension: 'correctness', file: 'backend/src/main/java/X.java', problem: 'npe' }] }; }
+    return ok0(p, o);
+  };
+})(), ({ calls }) => (buildersIn(calls, 2) === 'backend' ? 0 : 1));
+wf('workflow green: every round increments the round counter exactly once, with no standalone state call', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: '', tests: [{ file: 'e2e/tests/rooms.spec.ts', problem: 'wrong testid' }] }), ({ calls }) => {
+  const cmds = calls.filter((c) => c.opts.label?.startsWith('run:')).map((c) => runnerCommand(c.prompt));
+  const incs = cmds.filter((c) => /state\.mjs" round \+1/.test(c)).length;
+  const standalone = cmds.filter((c) => /^node "[^"]*state\.mjs" (round \+1|set subStep \S+)$/.test(c.trim())).length;
+  return incs === 2 && standalone <= 3 ? 0 : 1;
+});
 wf('workflow red: tester red prompt without self-check would be caught', 1, wfArgs({ stage: 'red' }), ok0, ({ calls }) => {
   const tester = calls.find((c) => c.opts.label?.startsWith('tester: red'));
   const stripped = tester.prompt.replace(/red-check/g, 'xxx');

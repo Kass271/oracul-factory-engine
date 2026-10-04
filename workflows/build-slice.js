@@ -40,9 +40,16 @@ const BUILDER_SCHEMA = {
 }
 const TRIAGE_SCHEMA = {
   type: 'object',
-  properties: { code: { type: 'string' }, tests: PROBLEMS },
+  properties: { code: { type: 'string' }, layers: { type: 'array', items: { type: 'string', enum: ['backend', 'frontend'] } }, tests: PROBLEMS },
   required: ['code', 'tests'],
 }
+// Which builders a code fix needs: round 1 and "unknown" → both; otherwise only the failing layer(s).
+const LAYERS = ['backend', 'frontend']
+const builderLayers = (w, round) => {
+  const l = (w.layers || []).filter((x) => LAYERS.includes(x))
+  return round === 1 || !l.length ? LAYERS : [...new Set(l)]
+}
+const layerOfFile = (f) => (/^backend\//.test(f || '') ? 'backend' : /^frontend\//.test(f || '') ? 'frontend' : null)
 const REVIEW_SCHEMA = {
   type: 'object',
   properties: {
@@ -157,7 +164,7 @@ const list = (ps) => ps.map((p) => `- ${p.file}: ${p.problem}`).join('\n')
 
 // Decide who fixes a failing gate: the tester (test is broken or contradicts the spec) or the builders (code).
 async function triage(gate, output, hints, round) {
-  const t = await agent(`${CTX}\n\nThe ${gate} gate of slice ${S} failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} ${S} r${round}`, schema: TRIAGE_SCHEMA })
+  const t = await agent(`${CTX}\n\nThe ${gate} gate of slice ${S} failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), layers = which builders that code fix needs ("backend", "frontend" or both; leave empty if unsure), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} ${S} r${round}`, schema: TRIAGE_SCHEMA })
   if (!t || (!t.code && !t.tests.length)) return { code: `${gate} is RED:\n${output}`, tests: [] }
   return t
 }
@@ -204,29 +211,28 @@ if (status === 'GREEN-PENDING') {
 }
 while (status === 'GREEN-PENDING' && rounds < MAX) {
   rounds++
-  await sh(node('bin/state.mjs', 'round +1'), `round ${rounds}`)
-
+  // State changes ride on the next command (fewer runner calls); every gate keeps its own sentinel.
   if (work.tests.length) {
-    await sh(node('bin/state.mjs', 'set subStep test-fix'), `state → test-fix r${rounds}`)
+    await sh(`${node('bin/state.mjs', 'round +1')} && ${node('bin/state.mjs', 'set subStep test-fix')}`, `round ${rounds} → test-fix`)
     await role('tester', `${CTX}\n\nFix round ${rounds} — repair these tests of slice ${S} (production code is locked for you):\n${list(work.tests)}\n\nThe spec and contract are the authority: make each test assert exactly what they say. Never weaken an assertion just to make it pass, never delete a test of an FR that is still valid, keep every @trace tag. Run the affected tests before finishing. ${TESTER_E2E}${e2eFailures ? `\n\n${e2eFailures}` : ''}`, `tester: fix ${S} r${rounds}`)
   }
   let hints = []
   if (work.code) {
-    await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
+    await sh(work.tests.length ? node('bin/state.mjs', 'set subStep green') : `${node('bin/state.mjs', 'round +1')} && ${node('bin/state.mjs', 'set subStep green')}`, `${work.tests.length ? '' : `round ${rounds} → `}state → green r${rounds}`)
     const task = rounds === 1 ? work.code : `Fix round ${rounds}. Fix exactly these problems:\n${work.code}`
     const tail = `\n\nWhile you work, run only the slice's tests (backend: ./gradlew test --tests <classes from ${sliceDir}/red-evidence.md and your fix list>; frontend: npm run test:ci -- --include <those specs>); run your whole layer once before you finish. Tests are locked for you. If you believe a test is wrong (contradicts the spec, broken, flaky), do not work around it — report it in testProblems; the tester fixes tests. ${NO_E2E}${e2eFailures ? `\n\n${e2eFailures}` : ''}`
-    const rs = await parallel([
-      () => role('backend-builder', `${CTX}\n\nStep 4c — backend for ${S}. ${task}${tail}`, `backend: ${S} r${rounds}`, BUILDER_SCHEMA),
-      () => role('frontend-builder', `${CTX}\n\nStep 4c — frontend for ${S}. ${task}${tail}`, `frontend: ${S} r${rounds}`, BUILDER_SCHEMA),
-    ])
+    const rs = await parallel(builderLayers(work, rounds).map((layer) => () => role(`${layer}-builder`, `${CTX}\n\nStep 4c — ${layer} for ${S}. ${task}${tail}`, `${layer}: ${S} r${rounds}`, BUILDER_SCHEMA)))
     hints = rs.filter(Boolean).flatMap((r) => r.testProblems || [])
   }
-  await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds}`)
+  // After a tests-only round the state is still test-fix (and round +1 is pending): both ride on the first verify.
+  const toGreen = work.code ? '' : `${work.tests.length ? '' : `${node('bin/state.mjs', 'round +1')} && `}${node('bin/state.mjs', 'set subStep green')} && `
   e2eFailures = ''
 
   // Fix rounds check the related tests first (seconds to minutes); the full verify below is the slice gate.
+  let verifyPrefix = toGreen
   if (rounds > 1) {
-    const rv = await sh(node('checks/verify.mjs', `--related --slice ${S}`), `verify related r${rounds}`, { gate: true })
+    const rv = await sh(`${verifyPrefix}${node('checks/verify.mjs', `--related --slice ${S}`)}`, `verify related r${rounds}`, { gate: true })
+    verifyPrefix = ''
     if (infraReason(rv)) { stopped = { gate: 'verify', reason: infraReason(rv), output: rv.output }; break }
     if (rv.exitCode !== 0) {
       failing = ['verify']
@@ -236,7 +242,7 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
       continue
     }
   }
-  const v = await sh(node('checks/verify.mjs'), `verify r${rounds}`, { gate: true })
+  const v = await sh(`${verifyPrefix}${node('checks/verify.mjs')}`, `verify r${rounds}`, { gate: true })
   if (infraReason(v)) { stopped = { gate: 'verify', reason: infraReason(v), output: v.output }; break }
   if (v.exitCode !== 0) {
     failing = ['verify']
@@ -287,9 +293,11 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   const open = (rv && rv.open) || []
   const testFindings = open.filter((f) => f.dimension === 'tests' || isTest(f.file))
   const codeFindings = open.filter((f) => !testFindings.includes(f))
+  const findingLayers = codeFindings.map((f) => layerOfFile(f.file))
   work = open.length
     ? {
         code: codeFindings.length ? `Review findings (${sliceDir}/review-findings.json):\n${codeFindings.map((f) => `- ${f.id} [${f.severity}] ${f.file}: ${f.problem}${f.fix ? ` — fix: ${f.fix}` : ''}`).join('\n')}` : '',
+        layers: findingLayers.includes(null) ? [] : findingLayers,
         tests: testFindings.map((f) => ({ file: f.file, problem: `${f.id} [${f.severity}] ${f.problem}${f.fix ? ` — fix: ${f.fix}` : ''}` })),
       }
     : { code: `${feedback}\nRead the open findings in the file; findings about tests are for the tester — report them in testProblems.`, tests: [] }

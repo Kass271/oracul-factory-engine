@@ -28,7 +28,11 @@ const RUN_SCHEMA = {
 }
 const PROBLEMS = { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, problem: { type: 'string' } }, required: ['file', 'problem'] } }
 const BUILDER_SCHEMA = { type: 'object', properties: { summary: { type: 'string' }, testProblems: PROBLEMS }, required: ['summary', 'testProblems'] }
-const TRIAGE_SCHEMA = { type: 'object', properties: { code: { type: 'string' }, tests: PROBLEMS }, required: ['code', 'tests'] }
+const TRIAGE_SCHEMA = { type: 'object', properties: { code: { type: 'string' }, layers: { type: 'array', items: { type: 'string', enum: ['backend', 'frontend'] } }, tests: PROBLEMS }, required: ['code', 'tests'] }
+// Which builders a code fix needs: "unknown" → both; otherwise only the failing layer(s).
+const LAYERS = ['backend', 'frontend']
+const builderLayers = (w) => { const l = (w.layers || []).filter((x) => LAYERS.includes(x)); return l.length ? [...new Set(l)] : LAYERS }
+const layerOfFile = (f) => (/^backend\//.test(f || '') ? 'backend' : /^frontend\//.test(f || '') ? 'frontend' : null)
 const REVIEW_SCHEMA = {
   type: 'object',
   properties: {
@@ -131,7 +135,7 @@ let hints = [] // tests the builders flagged as possibly wrong in the last fix r
 
 // Decide who fixes a failing gate: the tester (test is broken or contradicts the spec) or the builders (code).
 async function triage(gate, output, round) {
-  const t = await agent(`${CTX}\n\nThe ${gate} gate of the release failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} r${round}`, schema: TRIAGE_SCHEMA })
+  const t = await agent(`${CTX}\n\nThe ${gate} gate of the release failed in round ${round}. Decide for every failure whether the CODE or the TEST is wrong. Read the specs, the failing tests and the code; change nothing.\n- TEST is wrong only when the test itself is broken (does not compile, flaky timing, shared data, selector/testid not in the spec) or asserts something the spec/contract does not say (including behaviour a later spec changed).\n- Otherwise the CODE is wrong — a test that matches the spec is never the problem.\n\nBuilders flagged these tests as suspicious (hints, not verdicts):\n${hints.length ? list(hints) : '(none)'}\n\nFailure output:\n\`\`\`\n${output.slice(-6000)}\n\`\`\`\n\nReturn code = the failures the builders must fix, as precise instructions with the relevant output lines ("" if none), layers = which builders that code fix needs ("backend", "frontend" or both; leave empty if unsure), and tests = the test files the tester must repair, each with the reason.`, { label: `triage: ${gate} r${round}`, schema: TRIAGE_SCHEMA })
   if (!t || (!t.code && !t.tests.length)) return { code: `${gate} is RED:\n${output}`, tests: [] }
   return t
 }
@@ -142,8 +146,10 @@ function routeReview(rv, checkOutput) {
   const tests = open.filter((f) => f.dimension === 'tests' || isTest(f.file))
   const code = open.filter((f) => !tests.includes(f))
   const fmt = (f) => `${f.id} [${f.severity}] ${f.problem}${f.fix ? ` — fix: ${f.fix}` : ''}`
+  const layers = code.map((f) => layerOfFile(f.file))
   return {
     code: code.length ? `Release review findings (${rel}/review-findings.json):\n${code.map((f) => `- ${f.file}: ${fmt(f)}`).join('\n')}` : '',
+    layers: layers.includes(null) ? [] : layers,
     tests: tests.map((f) => ({ file: f.file, problem: fmt(f) })),
   }
 }
@@ -158,10 +164,7 @@ async function fix(round, work) {
   hints = []
   if (!work.code) return
   const task = `Release fix round ${round}. Fix exactly these problems (tests and contract are locked for you; if you believe a test is wrong, report it in testProblems — the tester fixes tests). ${NO_E2E}\n${work.code}${e2eFailures ? `\n\n${e2eFailures}` : ''}`
-  const rs = await parallel([
-    () => role('backend-builder', `${CTX}\n\n${task}`, `backend fix r${round}`, BUILDER_SCHEMA),
-    () => role('frontend-builder', `${CTX}\n\n${task}`, `frontend fix r${round}`, BUILDER_SCHEMA),
-  ])
+  const rs = await parallel(builderLayers(work).map((layer) => () => role(`${layer}-builder`, `${CTX}\n\n${task}`, `${layer} fix r${round}`, BUILDER_SCHEMA)))
   hints = rs.filter(Boolean).flatMap((r) => r.testProblems || [])
 }
 
