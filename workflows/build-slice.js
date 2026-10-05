@@ -59,7 +59,7 @@ const REVIEW_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: { type: 'string' }, severity: { type: 'string' }, dimension: { type: 'string' }, file: { type: 'string' }, problem: { type: 'string' }, fix: { type: 'string' } },
+        properties: { id: { type: 'string' }, severity: { type: 'string' }, kind: { type: 'string' }, dimension: { type: 'string' }, file: { type: 'string' }, problem: { type: 'string' }, fix: { type: 'string' } },
         required: ['id', 'severity', 'dimension', 'file', 'problem'],
       },
     },
@@ -362,10 +362,13 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
     continue
   }
 
-  await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${rounds}`)
+  // From round 2 the reviewer reviews the delta since its last review (snapshot tree), not the whole slice again.
+  const snap = rounds > 1 ? await sh(`${node('bin/state.mjs', 'set subStep review')} && ${node('bin/snapshot.mjs', '--show')}`, `state → review r${rounds}`) : await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${rounds}`)
+  const tree = ((snap.output || '').match(/TREE ([0-9a-f]{40})/) || [])[1]
+  const delta = tree ? ` Delta review: re-check every open finding in the file against the current code, then review only the output of \`${node('bin/snapshot.mjs', '--diff')}\` (the changes since your last review, tree ${tree}, new files included) — not the whole slice again.` : ''
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
-  const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. Verify and E2E are GREEN. Write ${sliceDir}/review-findings.json with "round": ${rounds}. If ${sliceDir}/red-evidence.md has a section "Red by startup only", check those tests under dimension "tests": each must assert real behaviour, not just that the context starts. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
-  const c = await sh(node('checks/check-review.mjs', `--slice ${S}`), `check-review r${rounds}`, { gate: true })
+  const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. Verify and E2E are GREEN. Write ${sliceDir}/review-findings.json with "round": ${rounds}; give every finding a "kind" (defect | hardening, see your rules).${delta} If ${sliceDir}/red-evidence.md has a section "Red by startup only", check those tests under dimension "tests": each must assert real behaviour, not just that the context starts. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
+  const c = await sh(`${node('bin/snapshot.mjs')} >/dev/null; ${node('checks/check-review.mjs', `--slice ${S}`)}`, `check-review r${rounds}`, { gate: true })
   if (infraReason(c)) { stopped = { gate: 'review', reason: infraReason(c), output: c.output }; break }
   if (c.exitCode === 0) { status = 'DONE'; failing = []; break }
   failing = ['review']

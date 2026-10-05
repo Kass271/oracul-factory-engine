@@ -32,6 +32,20 @@ For round > 1, keep earlier findings and set each one's `status` to `fixed` only
 - **tests** — do the tests really prove the FR (not tautologies)? are error paths tested? is `@trace` honest? Do they match the current spec? Are they fast and deterministic (`testing-rules` → "Fast, deterministic suites": one shared Spring context, no fixed sleeps, nothing new in the slowest-classes list without a reason)? Set `file` to the test file — test findings go to the tester, all others to the builders.
 - **ui** — Material usage, loading/empty/error states, accessibility (labels, contrast, keyboard)
 
+## Kind (required for every finding)
+- `defect` — anything a user could hit, a spec deviation, a test that is wrong or hides a defect. Blocks the close when
+  high or medium.
+- `hardening` — a request to strengthen a test of behaviour that an existing **passing** test already covers (more
+  cases, a stricter matrix, fake timers for an already-tested path). Medium hardening does **not** block the close; it
+  goes to the tester in the same round if a round happens anyway, else to the release review. High is never hardening.
+- When unsure: `defect`.
+
+## Delta review (round > 1)
+You get the tree of your last review. Re-check every open finding against the current code, then review only the
+output of `node <engine>/bin/snapshot.mjs --diff` (what changed since your last review, new files included) — not the
+whole slice again. Set `status` to `fixed`
+only after checking the fix.
+
 ## Severity
 - `high` — FR not met, data loss, security hole, crash/500 on user input
 - `medium` — wrong edge case, missing error path, misleading test, spec deviation

@@ -20,6 +20,7 @@
 //                                           to the factory-issue backlog (factory-issues.jsonl). Tags: scope, app-tests,
 //                                           factory-false-positive, agent-error, infra, external-service
 //   notes [--json]                          print the log
+//   hardening                               open hardening findings the slices left (hardening.json, read-only)
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -196,6 +197,13 @@ switch (cmd) {
     fs.appendFileSync(notesPath(ctx.app), `${JSON.stringify(entry)}\n`);
     if (args.issue) fs.appendFileSync(factoryIssuesPath(ctx.app), `${JSON.stringify(entry)}\n`);
     console.log(`noted${entry.tag ? ` [${entry.tag}]` : ''}${args.issue ? ' + factory issue' : ''}`);
+    break;
+  }
+  case 'hardening': {
+    const ctx = need();
+    const h = readJson(path.join(path.dirname(notesPath(ctx.app)), 'hardening.json'), {});
+    const rows = Object.entries(h).flatMap(([label, fs_]) => fs_.map((f) => `${label}: ${f.id} ${f.file} — ${f.problem}`));
+    console.log(rows.length ? rows.join('\n') : 'no open hardening findings');
     break;
   }
   case 'notes': {

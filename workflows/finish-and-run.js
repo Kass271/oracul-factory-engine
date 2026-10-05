@@ -41,7 +41,7 @@ const REVIEW_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        properties: { id: { type: 'string' }, severity: { type: 'string' }, dimension: { type: 'string' }, file: { type: 'string' }, problem: { type: 'string' }, fix: { type: 'string' } },
+        properties: { id: { type: 'string' }, severity: { type: 'string' }, kind: { type: 'string' }, dimension: { type: 'string' }, file: { type: 'string' }, problem: { type: 'string' }, fix: { type: 'string' } },
         required: ['id', 'severity', 'dimension', 'file', 'problem'],
       },
     },
@@ -193,7 +193,7 @@ for (let r = 1; r <= MAX && !clean; r++) {
   if (v.exitCode !== 0) { if (r < MAX) await fix(r, await triage('verify --scope all', v.output, r)); report.problems = ['verify']; continue }
   await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${r}`)
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
-  const rv = await role('reviewer', `${CTX}\n\nRelease review (whole app, all phases), round ${r}. Write ${rel}/review-findings.json with "slice": "release", "round": ${r}. Focus on cross-slice integration, error handling, security, and FRs that may have regressed. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: release r${r}`, REVIEW_SCHEMA)
+  const rv = await role('reviewer', `${CTX}\n\nRelease review (whole app, all phases), round ${r}. Write ${rel}/review-findings.json with "slice": "release", "round": ${r}. Focus on cross-slice integration, error handling, security, and FRs that may have regressed. Also judge the hardening backlog the slices left open (\`${node('bin/state.mjs', 'hardening')}\`): fix-worthy items become findings, the rest stay listed. Give every finding a "kind" (defect | hardening). Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: release r${r}`, REVIEW_SCHEMA)
   const c = await sh(node('checks/check-review.mjs', '--release'), `check-review release r${r}`, { gate: true })
   if (infraReason(c)) { infraStop = `release review: ${infraReason(c)}`; break }
   if (c.exitCode === 0) { clean = true; report.problems = []; break }

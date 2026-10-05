@@ -153,5 +153,6 @@ FRs:      <n> ✔ · <n> ✘ · <n> BLOCKED     (apps/<app>/docs/<phase>/05_rele
 Slices:   01_x DONE · 02_y BLOCKED (failure-note) · …
 QA pack:  test-plan.md · acceptance-report.md · how-to-run.md · screenshots/
 Flaky:    <none | tests from `node $E/bin/state.mjs flaky` — passed only on retry, PERSISTENT first; never blocking>
+Hardening:<none | open hardening findings from `node $E/bin/state.mjs hardening` — test strength, not defects>
 Problems: <none | list>
 ```

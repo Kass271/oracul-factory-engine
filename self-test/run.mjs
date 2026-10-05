@@ -163,6 +163,26 @@ test('review red: open high finding', 1, (sb) => {
   sb.put('docs/phase-01_mvp/05_release/review-findings.json', JSON.stringify({ round: 2, findings: [{ id: 'R1', severity: 'high', status: 'open' }] }));
   return node(sb, 'checks/check-review.mjs', ['--release']);
 });
+// G6: defect vs hardening
+const findings = (sb, list) => sb.put('docs/phase-01_mvp/04_build/01_rooms/review-findings.json', JSON.stringify({ round: 2, findings: list }));
+const F = (o) => ({ id: 'R1', severity: 'medium', status: 'open', file: 'backend/src/test/java/X.java', problem: 'p', ...o });
+test('review green: an open medium hardening finding does not block; it is collected', 0, (sb) => { findings(sb, [F({ kind: 'hardening' })]); return node(sb, 'checks/check-review.mjs', ['--slice', '01_rooms']); },
+  (sb, r) => (/WARN\s+slice 01_rooms: hardening R1 open/.test(r.out) && /R1/.test(fs.readFileSync(path.join(sb.stateDir, 'apps/fixture/hardening.json'), 'utf8'))) || r.out);
+test('review red: an open medium defect blocks', 1, (sb) => { findings(sb, [F({ kind: 'defect' })]); return node(sb, 'checks/check-review.mjs', ['--slice', '01_rooms']); });
+test('review red: an open high finding blocks whatever its kind', 1, (sb) => { findings(sb, [F({ severity: 'high', kind: 'hardening' })]); return node(sb, 'checks/check-review.mjs', ['--slice', '01_rooms']); });
+test('review red: a medium finding without a kind counts as a defect', 1, (sb) => { findings(sb, [F({})]); return node(sb, 'checks/check-review.mjs', ['--slice', '01_rooms']); });
+test('review red: an unknown kind is invalid', 1, (sb) => { findings(sb, [F({ kind: 'nice-to-have', severity: 'low' })]); return node(sb, 'checks/check-review.mjs', ['--slice', '01_rooms']); });
+test('snapshot green: records the working tree without touching the index or HEAD', 0, (sb) => {
+  gitApp(sb); sb.put('backend/src/main/java/New.java', 'class New {}');
+  const before = spawnSync('git', ['status', '--porcelain'], { cwd: sb.appDir, encoding: 'utf8' }).stdout;
+  const r1 = node(sb, 'bin/snapshot.mjs');
+  const after = spawnSync('git', ['status', '--porcelain'], { cwd: sb.appDir, encoding: 'utf8' }).stdout;
+  const tree = (r1.out.match(/TREE ([0-9a-f]{40})/) || [])[1];
+  const d0 = node(sb, 'bin/snapshot.mjs', ['--diff']).out;
+  sb.put('backend/src/main/java/New.java', 'class New { int x; }'); sb.put('backend/src/main/java/Other.java', 'class Other {}');
+  const d1 = node(sb, 'bin/snapshot.mjs', ['--diff']).out;
+  return { code: tree && before === after && /no changes since the last review/.test(d0) && /New\.java/.test(d1) && /Other\.java/.test(d1) && /int x/.test(d1) ? 0 : 1, out: `${r1.out} | ${d0} | ${d1}` };
+});
 test('review red: review file missing', 1, (sb) => { sb.rm('docs/phase-01_mvp/04_build/01_rooms/review-findings.json'); return node(sb, 'checks/check-review.mjs'); });
 
 // ---------------- artifacts
@@ -1632,6 +1652,18 @@ wf('workflow green: a park that runs → BLOCKED with the impact read before it'
   const i = calls.findIndex((c) => /state\.mjs" impact 01_rooms/.test(c.prompt)), p = calls.findIndex((c) => /checkout HEAD -- backend/.test(c.prompt));
   return result.status === 'BLOCKED' && result.decision === 'CONTINUE' && i >= 0 && p > i ? 0 : 1;
 });
+const reviewerPrompt = (calls, r) => calls.find((c) => c.opts.label === `reviewer: 01_rooms r${r}`)?.prompt || '';
+const TREE40 = 'a'.repeat(40);
+wf('review green: round 2 reviews only the delta since the last review; round 1 the whole slice', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
+  let reviews = 0;
+  return (p, o) => {
+    if (/snapshot\.mjs" --show/.test(p)) return { exitCode: 0, output: `review r2\nTREE ${TREE40}` };
+    if (/check-review/.test(p)) return { exitCode: reviews > 1 ? 0 : 1, output: 'INVALID open' };
+    if (o.label?.startsWith('reviewer')) { reviews++; return { open: [{ id: 'R1', severity: 'medium', kind: 'defect', dimension: 'correctness', file: 'backend/src/main/java/X.java', problem: 'npe' }] }; }
+    return ok0(p, o);
+  };
+})(), ({ result, calls }) => (result.status === 'DONE' && !/Delta review/.test(reviewerPrompt(calls, 1)) && new RegExp(`Delta review.*snapshot\\.mjs" --diff.*tree ${TREE40}`).test(reviewerPrompt(calls, 2))
+  && calls.some((c) => /snapshot\.mjs" >\/dev\/null; node .*check-review/.test(runnerCommand(c.prompt))) ? 0 : 1));
 const stopLog = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: log stop')).map((c) => runnerCommand(c.prompt));
 wf('notes green: a STOPPED by a factory command error is logged as factory-false-positive + backlog', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 1, output: "Problem configuring task :jacocoTestReport from command line.\n> Unknown command-line option '--tests'." })),
