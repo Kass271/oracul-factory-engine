@@ -399,17 +399,10 @@ phase('Close')
 // rewrites the coverage report and JUnit XML), then the checks, then the mutations — baseline, commit, and DONE last.
 // A failing close never parks: verify, E2E and review already passed, so the code stays and the slice STOPS.
 if (status === 'DONE') {
-  const close = await sh([
-    node('checks/verify.mjs', '--reuse-if-fresh'),
-    node('checks/check-e2e-fresh.mjs', '--allow-missing'),
-    node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage done`),
-    node('checks/check-coverage.mjs', '--update'),
-    node('bin/commit.mjs', `--message "${A.phase} ${S}: done (${FRS})"`),
-    node('bin/state.mjs', `slice ${S} DONE`),
-    node('bin/state.mjs', 'set subStep none'),
-  ].join(' && '), `close ${S}`, { gate: true })
+  // One deterministic close (bin/close-slice.mjs) — the same command the orchestrator's takeover uses.
+  const close = await sh(node('bin/close-slice.mjs', `--slice ${S} --check-only`), `close ${S}`, { gate: true })
   if (close.exitCode === 0) return { status, slice: S, rounds, failing: [], output: close.output.slice(-1500) }
-  const why = infraReason(close) || (close.output.split('\n').map((l) => l.trim()).find((l) => /^(INVALID|MISSING)\b|^==== VERIFY RED/.test(l)) || `exit ${close.exitCode}`)
+  const why = infraReason(close) || (close.output.split('\n').map((l) => l.trim()).find((l) => /^(INVALID|MISSING)\b|^==== VERIFY RED/.test(l)) || (close.output.match(/CLOSE FAILED at "[^"]+"/) || [])[0] || `exit ${close.exitCode}`)
   await note('Close failed', `- ${why}\n- Not parked: verify, E2E and review had passed. The slice stays IN_PROGRESS with its code; "continue" resumes it at stage green.\n- Output:\n\n\`\`\`\n${close.output.slice(-1500)}\n\`\`\``)
   await sh(node('bin/state.mjs', 'set subStep green'), 'state → green (close failed)')
   return logStop({ status: 'STOPPED', slice: S, rounds, failing: [`close: ${why}`], output: close.output.slice(-1500) })

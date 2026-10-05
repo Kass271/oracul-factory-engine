@@ -786,6 +786,26 @@ test('docs green: valid shell blocks (incl. a subshell) parse', 0, (sb) => { sb.
   (sb, r) => /2 shell block/.test(r.out) || r.out);
 test('docs green: no shell blocks → PASS', 0, (sb) => { sb.put('README.md', '# Title\n\n```json\n{"a": 1}\n```\n'); return docsCheck(sb, 'README.md'); });
 
+// ---------------- G11: bin/close-slice.mjs — the one deterministic close
+const closePlan = (sb, a = []) => node(sb, 'bin/close-slice.mjs', ['--slice', '01_rooms', '--dry-run', ...a]);
+test('close green: --check-only order = docs → review → E2E fresh → verify reuse → artifacts → coverage → commit → DONE → none', 0, (sb) => closePlan(sb, ['--check-only']), (sb, r) => {
+  const at = ['check-docs', 'check-review.mjs --slice 01_rooms', 'check-e2e-fresh.mjs --allow-missing', 'verify.mjs --reuse-if-fresh', 'check-artifacts.mjs --step 04_build --slice 01_rooms --stage done', 'check-coverage.mjs --update', 'commit.mjs --message', 'slice 01_rooms DONE', 'set subStep none'].map((x) => r.out.indexOf(x));
+  return (at.every((v, i) => v >= 0 && (i === 0 || v > at[i - 1])) && !/--incremental/.test(r.out)) || r.out;
+});
+test('close green: without --check-only the slice gate runs first (incremental verify + needed E2E)', 0, (sb) => closePlan(sb), (sb, r) => {
+  const a = r.out.indexOf('verify.mjs --incremental'), b = r.out.indexOf('e2e --needed --no-up'), c = r.out.indexOf('check-review.mjs');
+  return (a >= 0 && b > a && c > b) || r.out;
+});
+test('close red: an open blocking finding stops the close before anything is committed', 1, (sb) => {
+  gitApp(sb); findings(sb, [F({ kind: 'defect' })]);
+  return node(sb, 'bin/close-slice.mjs', ['--slice', '01_rooms', '--check-only']);
+}, (sb, r) => (/CLOSE FAILED at "review"/.test(r.out) && spawnSync('git', ['log', '--oneline'], { cwd: sb.appDir, encoding: 'utf8' }).stdout.trim().split('\n').length === 1) || r.out);
+test('close red: a stale E2E gate stops the close', 1, (sb) => {
+  gitApp(sb); recordGatesFor(sb, ['e2e:rooms.spec.ts']); sb.put('frontend/src/app/x.ts', 'x');
+  return node(sb, 'bin/close-slice.mjs', ['--slice', '01_rooms', '--check-only']);
+}, (sb, r) => /CLOSE FAILED at "E2E covers the current code"/.test(r.out) || r.out);
+test('close red: unknown slice', 1, (sb) => node(sb, 'bin/close-slice.mjs', ['--slice', '09_x', '--dry-run']));
+
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 test('guard red: write into factory-engine', 2, (sb) => hook(sb, 'guard-edits', W(path.join(ENGINE, 'checks', 'verify.mjs'))));
@@ -1414,12 +1434,7 @@ wf('workflow green: focus unsupported (exit 5) → straight to the full official
 wf('workflow green: the full run is skipped when check-e2e-fresh says the code was already tested', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   (p, o) => (FRESH_PROBE.test(p) ? { exitCode: 0, output: 'PASS the last full E2E run passed on exactly this code' } : ok0(p, o)),
   ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).length === 0 ? 0 : 1));
-wf('workflow green: close checks the E2E freshness right after the verify reuse', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
-  const c = calls.find((x) => CLOSE.test(x.prompt));
-  const p = c ? runnerCommand(c.prompt) : '';
-  const a = p.indexOf('verify.mjs" --reuse-if-fresh'), b = p.indexOf('check-e2e-fresh.mjs" --allow-missing'), d = p.indexOf('check-artifacts.mjs');
-  return a >= 0 && b > a && d > b ? 0 : 1;
-});
+
 const buildersIn = (calls, r) => calls.filter((c) => new RegExp(`^(backend|frontend): 01_rooms r${r}$`).test(c.opts.label || '')).map((c) => c.opts.label.split(':')[0]).sort().join(',');
 const triageSays = (answer) => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : o.label?.startsWith('triage') ? answer : ok0(p, o)); };
 wf('workflow green: triage says backend → only the backend builder runs the fix round', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: 'fix the 500', layers: ['backend'], tests: [] }),
@@ -1562,7 +1577,7 @@ wf('workflow green: exitSource "runner" restores the old behaviour (runner exitC
   verifyAs(() => ({ exitCode: 1, output: 'ORACUL_EXIT=0', raw: true })), ({ calls }) =>
     (triaged(calls) && !calls.some((c) => /ORACUL_EXIT=\$\?/.test(c.prompt)) ? 0 : 1));
 wf('workflow red: close chain without exit code → STOPPED "close: …", slice not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
-  (p, o) => (/commit\.mjs"/.test(p) && /slice 01_rooms DONE/.test(p) ? { exitCode: 0, output: '', raw: true } : ok0(p, o)), ({ result, calls }) =>
+  (p, o) => (CLOSE.test(p) ? { exitCode: 0, output: '', raw: true } : ok0(p, o)), ({ result, calls }) =>
     (result.status === 'STOPPED' && result.failing.includes('close: runner returned no exit code') && !parked(calls) ? 1 : 0));
 const waitAnswers = (codes) => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? (() => { const c = codes[Math.min(n++, codes.length - 1)]; return { exitCode: c, output: c === 75 ? 'E2E STILL RUNNING (480s since start)' : c === 4 ? 'E2E WORKER LOST: worker pid 9 is gone' : 'E2E PASS' }; })() : ok0(p, o)); };
 const waits = (calls) => calls.filter((c) => /stack\.mjs" e2e-wait/.test(c.prompt)).length;
@@ -1572,7 +1587,7 @@ wf('workflow red: E2E never finishes → STOPPED "e2e: timed out" after 8 waits,
   (result.status === 'STOPPED' && result.failing.includes('e2e: timed out') && waits(calls) === 8 && !triaged(calls) ? 1 : 0));
 wf('workflow red: E2E worker died → STOPPED "e2e: e2e worker lost", no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), waitAnswers([75, 4]), ({ result, calls }) =>
   (result.status === 'STOPPED' && result.failing.includes('e2e: e2e worker lost') && !triaged(calls) ? 1 : 0));
-const CLOSE = /verify\.mjs" --reuse-if-fresh[\s\S]*slice 01_rooms DONE/;
+const CLOSE = /close-slice\.mjs" --slice 01_rooms --check-only/;
 const failureNoted = (calls) => calls.some((c) => /^failure note/.test(c.opts.label || ''));
 wf('workflow red: close fails (a check says INVALID) → STOPPED "close: INVALID …", not parked, no failure note', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   (p, o) => (CLOSE.test(p) ? { exitCode: 1, output: 'verify: reusing the full GREEN verify of x\nINVALID  docs/phase-01_mvp/02_specs [sliceSpec] — FR-1 lacks "- Ranges & invariants"\nRESULT  FAIL (1 problem)' } : ok0(p, o)),
@@ -1581,13 +1596,8 @@ wf('workflow red: close fails (a check says INVALID) → STOPPED "close: INVALID
 wf('workflow red: close re-verify finds RED → STOPPED "close: ==== VERIFY RED …", not parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   (p, o) => (CLOSE.test(p) ? { exitCode: 1, output: 'verify: test/coverage output changed after it (backend/build/reports/jacoco/test/jacocoTestReport.xml) — running a full verify\n==== VERIFY RED: backend ====' } : ok0(p, o)),
   ({ result, calls }) => (result.status === 'STOPPED' && result.failing.some((f) => /^close: ==== VERIFY RED/.test(f)) && !parked(calls) ? 1 : 0));
-wf('workflow green: close = re-verify if needed → artifacts → coverage --update → commit → DONE → subStep none, in that order', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) => {
-  const c = calls.find((x) => CLOSE.test(x.prompt));
-  if (!c || result.status !== 'DONE') return 1;
-  const p = runnerCommand(c.prompt);
-  const at = ['verify.mjs" --reuse-if-fresh', 'check-artifacts.mjs" --step 04_build --slice 01_rooms --stage done', 'check-coverage.mjs" --update', 'commit.mjs" --message', 'slice 01_rooms DONE', 'set subStep none', 'ORACUL_EXIT'].map((x) => p.indexOf(x));
-  return at.every((v, i) => v >= 0 && (i === 0 || v > at[i - 1])) ? 0 : 1;
-});
+wf('workflow green: the close is one command — bin/close-slice.mjs --check-only', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) =>
+  (result.status === 'DONE' && calls.filter((c) => CLOSE.test(c.prompt)).length === 1 && !calls.some((c) => /commit\.mjs"/.test(c.prompt)) ? 0 : 1));
 const START = /check-artifacts\.mjs" --step 04_build --slice 01_rooms --stage red/;
 const builders = (calls) => calls.filter((c) => /^(backend|frontend): /.test(c.opts.label || '')).length;
 wf('workflow red: slice spec lines missing at green start → STOPPED "start: INVALID …", no builder ran', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
