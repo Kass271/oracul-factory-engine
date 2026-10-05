@@ -238,6 +238,18 @@ test('artifacts green: change names an existing test', 0, (sb) => {
   sb.edit(SPEC, '- Changes earlier behaviour: none', '- Changes earlier behaviour: 201 → 200 (tests: backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java#createsRoom)');
   return node(sb, 'checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_rooms', '--stage', 'spec']);
 });
+// F7: slice size — WARN, never INVALID
+const fiveFrPlan = (sb) => sb.edit('docs/phase-01_mvp/03_plan/plan.md', '| 01_rooms | FR-1 |', '| 01_rooms | FR-1, FR-2, FR-3, FR-4, FR-5 |');
+test('size green: a 5-FR slice at step 03_plan → WARN, exit unchanged', 1, (sb) => { sb.state({ step: '03_plan' }); fiveFrPlan(sb); return node(sb, 'checks/check-artifacts.mjs', ['--step', '03_plan', '--only', '03_plan']); },
+  (sb, r) => /WARN .*SLICE SIZE: 01_rooms has 5 FRs/.test(r.out) || r.out);
+test('size green: no WARN once the plan step is over (approved plans are not re-checked)', 0, (sb) => node(sb, 'checks/check-artifacts.mjs', ['--step', '03_plan']), (sb, r) => !/SLICE SIZE/.test(r.out) || r.out);
+test('size green: small slices → no WARN', 0, (sb) => { sb.state({ step: '03_plan' }); return node(sb, 'checks/check-artifacts.mjs', ['--step', '03_plan']); }, (sb, r) => !/SLICE SIZE/.test(r.out) || r.out);
+test('size green: 11 superseded older tests at the spec gate → WARN, exit 0', 0, (sb) => {
+  const files = Array.from({ length: 11 }, (_, i) => `backend/src/test/java/com/oracul/app/old/Old${i}IT.java`);
+  files.forEach((f) => sb.put(f, 'class X {}'));
+  sb.edit(SPEC, '- Changes earlier behaviour: none', `- Changes earlier behaviour: list → grid (tests: ${files.join(', ')})`);
+  return node(sb, 'checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_rooms', '--stage', 'spec']);
+}, (sb, r) => /WARN .*SLICE SIZE: 01_rooms rewrites 11 older tests/.test(r.out) || r.out);
 test('artifacts green: 04_build sweep does not re-check spec lines of finished slices', 0, (sb) => {
   sb.edit(SPEC, '- Ranges & invariants: none\n', '');
   return node(sb, 'checks/check-artifacts.mjs', ['--step', '04_build']);
@@ -1524,6 +1536,10 @@ wf('workflow red: the contract stays invalid after one repair → STOPPED, no bu
     && !L.some((l) => /^(backend|frontend): sync|^tester: red/.test(l)) ? 1 : 0;
 });
 wf('workflow green: a valid contract → no analyst repair', 0, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [0] }), ({ calls }) => (!labelsOf(calls).some((l) => /^analyst: repair contract/.test(l)) ? 0 : 1));
+wf('size red: a large rewrite stops stage red before the tester (the user decides)', 1, wfArgs({ stage: 'red' }), (p, o) => (/slice size 01_rooms/.test(o.label || '') ? { exitCode: 0, output: 'WARN …SLICE SIZE: 01_rooms rewrites 14 older tests (> 10)' } : syncAnswer({ compiles: [0] })(p, o)),
+  ({ result, calls }) => (result.status === 'STOPPED' && /^size: SLICE SIZE/.test(result.failing[0]) && !labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 1 : 0));
+wf('size green: acceptSize + resumeAfterSpec → no spec step, no size stop, the tester runs', 0, wfArgs({ stage: 'red', acceptSize: true, resumeAfterSpec: true }), (p, o) => (/slice size/.test(o.label || '') ? { exitCode: 0, output: 'SLICE SIZE: big' } : syncAnswer({ compiles: [0] })(p, o)),
+  ({ result, calls }) => (!result.status && !labelsOf(calls).some((l) => /^analyst: spec/.test(l)) && labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 0 : 1));
 wf('workflow green: stage red retry (redFeedback) runs the sync again — problem 6', 0, wfArgs({ stage: 'red', redFeedback: 'WRONG-REASON: backend: compile error in main (3)' }), syncAnswer(), ({ calls }) =>
   (labelsOf(calls).some((l) => /^backend: sync 01_rooms r1$/.test(l)) && !labelsOf(calls).some((l) => /^analyst: spec/.test(l)) ? 0 : 1));
 wf('workflow green: unlisted older tests → the analyst lists them before the tester starts', 0, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [0], unlisted: true }), ({ calls }) => {

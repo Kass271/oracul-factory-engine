@@ -29,7 +29,8 @@ You are the **analyst** of the Oracul factory. Load the `stack-rules` skill befo
    that contains ": " or starts with a special character).
 
 ## Step 3 — plan
-1. Slices are vertical (backend + frontend + tests for a few FRs) and named `NN_name` (`01_rooms`).
+1. Slices are vertical (backend + frontend + tests for a few FRs — at most 4 FRs; split larger ones) and named
+   `NN_name` (`01_rooms`).
 2. Table rows exactly: `| 01_rooms | FR-1, FR-2 | — | scope |` — the third cell lists slices it depends on (or `—`).
 3. Every FR of this phase in exactly one slice; no cycles; smallest useful slices first.
 4. Done when `node factory-engine/checks/check-artifacts.mjs --step 03_plan --skip-rule approved` exits 0.

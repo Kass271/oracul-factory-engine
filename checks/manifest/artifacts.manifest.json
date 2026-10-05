@@ -23,6 +23,7 @@
   ],
   "03_plan": [
     { "path": "docs/{phase}/03_plan/plan.md", "rule": "planCoversFrs" },
+    { "path": "docs/{phase}/03_plan/plan.md", "rule": "planSliceSize" },
     { "path": "docs/{phase}/03_plan/plan.md", "rule": "approved" }
   ],
   "04_build": [

@@ -76,7 +76,8 @@ then commit `"<phase> 02_specs: specs + contract"` and `set step 03_plan`.
 
 ## Step 3 — plan
 Agent `oracul:analyst`: "Step 3: write `$PD/03_plan/plan.md` for this phase."
-Check: `check-artifacts --step 03_plan --skip-rule approved` = 0. Show the user the slice table and the graph.
+Check: `check-artifacts --step 03_plan --skip-rule approved` = 0. Show the user the slice table, the graph and any
+`SLICE SIZE` warning (a slice with more than 4 FRs — the user may ask the analyst to split it).
 Ask: **"Approve the plan, or tell me what to change."** Changes → analyst updates, show again.
 Approved →
 ```
@@ -104,6 +105,9 @@ Loop:
       → contract sync (only when a contract change broke the production compile: builders add marker stubs / declared
       renames, `check-sync` proves no behaviour was added) → tester writes the RED tests, updates superseded tests and
       self-checks them with red-check.
+      Result `{ stage: "red", status: "STOPPED", failing: ["size: …"] }` → the spec delta rewrites more than 10 older
+      tests. Ask the user: split the slice (analyst updates the plan; user approves) or continue — then `B` with
+      `stage: "red", resumeAfterSpec: true, acceptSize: true`.
       Result `{ stage: "red", status: "STOPPED", failing: ["sync: …"] }` → the contract break is too large or undeclared:
       stop the phase, show the failing line and the slice's rounds.md "Contract sync stopped" note, ask the user.
    2. Run it yourself with the Bash tool, foreground, `timeout: 600000` (never through an agent):

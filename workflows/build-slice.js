@@ -12,6 +12,8 @@ export const meta = {
 
 // args: { engine, root, app, appDir, phase, phaseDir, slice, frs: [..], stage: 'red'|'green', agentNs?: 'oracul', maxRounds?: 3 }
 //   stage red:   redFeedback?  — red-check output of the rejected previous attempt (skips the spec step)
+//                resumeAfterSpec? — skip the spec step (its docs are done), e.g. after the user accepted a large slice
+//                acceptSize?   — the user decided to keep a slice the size check flagged (F7)
 //   stage green: red: { exitCode, output } — result of `node bin/red-check.mjs --slice <s>` run by the orchestrator
 const A = args || {}
 const need = ['engine', 'root', 'app', 'appDir', 'phase', 'phaseDir', 'slice', 'stage']
@@ -117,7 +119,7 @@ function delayTag(failing) {
   if (/stack busy|blocked by guard hook|timed out|e2e worker lost|runner returned no exit code|^park:|\bpark:/.test(f)) return 'infra'
   if (/sync: contract invalid/.test(f)) return 'agent-error'
   if (/^start:|^close:/.test(f)) return 'agent-error'
-  if (/^takeover:/.test(f)) return 'scope'
+  if (/^takeover:|^size:/.test(f)) return 'scope'
   return 'scope'
 }
 async function logStop(result) {
@@ -247,9 +249,18 @@ async function contractSync() {
 // ================================================================ stage red
 if (A.stage === 'red') {
   phase('Spec')
-  if (!A.redFeedback) {
+  if (!A.redFeedback && !A.resumeAfterSpec) {
     await sh(`${node('bin/state.mjs', `set slice ${S}`)} && ${node('bin/state.mjs', `slice ${S} IN_PROGRESS`)} && ${node('bin/state.mjs', 'set subStep spec')}`, 'state → spec')
     await role('analyst', `${CTX}\n\nStep 4a — slice spec delta for ${S}. Make the spec(s) covering ${FRS} and api/openapi.yaml precise enough to write failing tests without guessing (paths, payloads, statuses, ApiError.code values, UI route, data-testid names). Every FR of the slice must get the line "- Changes earlier behaviour: none | <old> → <new> (tests: <app-relative test files> | none)" — find those tests by grepping the existing tests for every path, field, error code, data-testid, ordering and outbound call this slice changes. If an FR changes how the Docker stack starts (compose files, profiles, stub vs real mode), write ${A.appDir}/.oracul/stack.json with mode "e2e" (the stack the factory's E2E tests — deterministic, stubs on) and mode "run" (what the user starts), see ${A.engine}/checks/lib/stack.mjs — and the line "- Ranges & invariants: none | <input ranges with valid/invalid classes, rules that must hold for all data>". Keep contract changes additive where you can; declare every renamed schema, property or enum value in ${A.phaseDir}/02_specs/contract-notes.md as "Renamed: Old → New" (one line each), and list every existing test a changed response breaks under "Changes earlier behaviour". Done when ${node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage spec`)} exits 0. Do not touch code or tests.`, `analyst: spec ${S}`)
+  }
+  // F7: a large rewrite of older tests is known only after the spec delta — the user decides before the tester starts.
+  if (!A.redFeedback && !A.acceptSize) {
+    const size = await sh(node('checks/check-artifacts.mjs', `--step 04_build --slice ${S} --stage spec`), `slice size ${S}`, { gate: true })
+    const warn = (size.output.match(/SLICE SIZE: [^\n]*/) || [])[0]
+    if (warn) {
+      await note('Slice size', `- ${warn}\n- Stopped before the tester: the user decides — split the slice (plan change, analyst) or continue with acceptSize.`)
+      return logStop({ stage: 'red', status: 'STOPPED', slice: S, failing: [`size: ${warn}`], output: warn })
+    }
   }
   // Contract sync — on the first attempt and on every retry: a contract change can leave production code uncompilable,
   // and only builders may touch it. They make it compile with marker stubs and declared renames; check-sync proves no

@@ -91,7 +91,16 @@ const RULES = {
       }
       if (!f.ranges) problems.push(`${id} (${f.file}) lacks "- Ranges & invariants: none | <ranges and invariants>"`);
     }
-    return !problems.length || problems.join('; ');
+    if (problems.length) return problems.join('; ');
+    // F7: a large rewrite of older tests is known only now — warn (the orchestrator asks the user: split or continue).
+    const superseded = new Set(s.frs.flatMap((id) => (specs.get(id)?.changes || []).flatMap((c) => c.tests)));
+    return superseded.size > 10 ? { warn: `SLICE SIZE: ${slice} rewrites ${superseded.size} older tests (> 10) — consider splitting the slice` } : true;
+  },
+  // F7: slices with more than 4 FRs — only while the plan is being made (approved plans are never re-checked).
+  planSliceSize: () => {
+    if (ctx.state?.step !== '03_plan') return true;
+    const big = plan().filter((x) => x.frs.length > 4);
+    return big.length ? { warn: `SLICE SIZE: ${big.map((x) => `${x.slice} has ${x.frs.length} FRs`).join('; ')} (> 4) — consider splitting` } : true;
   },
   reviewFile: (p) => Array.isArray(readJson(p)?.findings) || 'not valid JSON with a "findings" array',
   reviewClean: (p) => {
@@ -166,6 +175,7 @@ function checkItem(item, slice) {
   const dirRule = ['specsCoverFrs', 'screenshotPerUiFr', 'sliceSpec', 'noSyncMarkers'].includes(name);
   if (!dirRule && !exists(abs)) return r.missing(label);
   const res = RULES[name] ? RULES[name](abs, arg, slice) : `unknown rule ${name}`;
+  if (res && typeof res === 'object' && res.warn) { r.warn(`${label} — ${res.warn}`); r.pass(label); return; }
   res === true ? r.pass(label) : r.invalid(`${label} — ${res}`);
 }
 
