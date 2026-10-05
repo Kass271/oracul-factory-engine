@@ -50,8 +50,10 @@ const builderLayers = (w, round) => {
   const l = (w.layers || []).filter((x) => LAYERS.includes(x))
   return round === 1 || !l.length ? LAYERS : [...new Set(l)]
 }
-// Stack wiring has owners (F10): compose files and stub services → backend builder, frontend/nginx.conf → frontend builder.
-const layerOfFile = (f) => (/^backend\//.test(f || '') || /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(f || '') ? 'backend' : /^frontend\//.test(f || '') ? 'frontend' : null)
+// Owners (F10): compose files and stub services → backend builder, frontend/nginx.conf → frontend builder; repository docs
+// (README.md, *.md outside a layer, docs/ other than the factory's own) → backend builder alone — a docs fix never
+// starts both builders.
+const layerOfFile = (f) => (/^backend\//.test(f || '') || /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(f || '') || /^[^/]+\.md$/i.test(f || '') ? 'backend' : /^frontend\//.test(f || '') ? 'frontend' : null)
 const REVIEW_SCHEMA = {
   type: 'object',
   properties: {
@@ -159,21 +161,26 @@ const note = (title, body) => {
 //   3. `stack.mjs e2e-wait --max 480`, repeated while it answers 75 (still running), up to E2E_WAITS times
 // "stack busy" on 1 or 2 is rerun once; anything else infrastructure-like ends up in infraReason().
 const E2E_WAITS = 8
-// focus = a fix round's run of the slice's related specs + last failures (stack.mjs --focus-slice). Exit 5 (config
-// without separate report dirs) / 6 (nothing to focus on) → { focusSkipped }: the caller runs the full official E2E.
-async function e2eRun(label, focus = false) {
+// E2E of the specs that are not green on the current inputs (gate ledger) — official runs, each spec recorded.
+//   focus = a round: only those among the slice's related specs, the failed ones and the changed spec files
+//   otherwise = the slice gate: every spec not green on the current inputs
+// A probe (dry run, in subStep e2e) answers "E2E NOTHING NEEDED" → no stack up, no Playwright.
+async function e2eNeeded(label, focus) {
   const retryBusy = async (cmd, l) => {
     let r = await sh(cmd, l, { gate: true })
     if (infraReason(r) === 'stack busy') { log(`${l}: stack busy — rerunning once`); r = await sh(cmd, `${l} (stack busy, retry)`, { gate: true }) }
     return r
   }
-  const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up --mode e2e')}`, `${label}: docker up`)
+  const sel = `--needed${focus ? ` --focus ${S}` : ''}`
+  const probe = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', `e2e ${sel} --dry-run`)}`, `${label}: which specs?`)
+  if (probe.exitCode !== 0) return probe
+  if (/E2E NOTHING NEEDED/.test(probe.output)) return { exitCode: 0, output: probe.output, nothing: true }
+  const up = await retryBusy(node('bin/stack.mjs', 'up --mode e2e'), `${label}: docker up`)
   if (up.exitCode !== 0) return up
-  const start = await retryBusy(node('bin/stack.mjs', focus ? `e2e --detach --focus-slice ${S}` : 'e2e --detach'), `${label}: start Playwright`)
-  if (focus && (start.exitCode === 5 || start.exitCode === 6)) return { ...start, focusSkipped: true }
-  if (start.exitCode !== 0) return start
+  const start = await retryBusy(node('bin/stack.mjs', `e2e --detach ${sel}`), `${label}: start Playwright`)
+  if (start.exitCode !== 0 || /E2E NOTHING NEEDED/.test(start.output)) return { ...start, nothing: /E2E NOTHING NEEDED/.test(start.output) }
   for (let i = 1; i <= E2E_WAITS; i++) {
-    const w = await sh(node('bin/stack.mjs', 'e2e-wait --max 480'), `${label}: wait ${i}`, { gate: true })
+    const w = await sh(node('bin/stack.mjs', 'e2e-wait --max 480'), `${label}: waiting for E2E (${i}/${E2E_WAITS})`, { gate: true })
     if (w.exitCode !== 75) return w
   }
   return { exitCode: 124, output: `E2E still running after ${E2E_WAITS} waits of 480 s` }
@@ -307,70 +314,40 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
   // After a tests-only round the state is still test-fix (and round +1 is pending): both ride on the first verify.
   const toGreen = work.code ? '' : `${work.tests.length ? '' : `${node('bin/state.mjs', 'round +1')} && `}${node('bin/state.mjs', 'set subStep green')} && `
   e2eFailures = ''
-
-  // Fix rounds check the related tests first (seconds to minutes); the full verify below is the slice gate.
-  let verifyPrefix = toGreen
-  if (rounds > 1) {
-    const rv = await sh(`${verifyPrefix}${node('checks/verify.mjs', `--related --slice ${S}`)}`, `verify related r${rounds}`, { gate: true })
-    verifyPrefix = ''
-    if (infraReason(rv)) { stopped = { gate: 'verify', reason: infraReason(rv), output: rv.output }; break }
-    if (rv.exitCode !== 0) {
-      failing = ['verify']
-      feedback = `verify (related tests) is RED:\n${rv.output}`
-      work = await triage('verify (related tests)', rv.output, hints, rounds)
-      await note(`Round ${rounds}`, `- Trigger: verify (related tests) RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${rv.output.slice(-3000)}\n\`\`\``)
-      continue
-    }
-  }
-  const v = await sh(`${verifyPrefix}${node('checks/verify.mjs')}`, `verify r${rounds}`, { gate: true })
-  if (infraReason(v)) { stopped = { gate: 'verify', reason: infraReason(v), output: v.output }; break }
-  if (v.exitCode !== 0) {
-    failing = ['verify']
-    feedback = `verify is RED:\n${v.output}`
-    work = await triage('verify', v.output, hints, rounds)
-    await note(`Round ${rounds}`, `- Trigger: verify RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${v.output.slice(-3000)}\n\`\`\``)
-    continue
+  // A failing gate of this round → triage → next round. Returns true when the round must end.
+  const failed = async (gate, r, label) => {
+    if (infraReason(r)) { stopped = { gate, reason: infraReason(r), output: r.output }; return true }
+    if (r.exitCode === 0) return false
+    failing = [gate]
+    feedback = `${label} is RED:\n${r.output}`
+    if (gate === 'e2e') { e2eFailures = failureBlock(r.output); await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds} (after ${label})`) }
+    work = await triage(label, r.output, hints, rounds)
+    await note(`Round ${rounds}`, `- Trigger: ${label} RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${String(r.output).slice(-3000)}\n\`\`\``)
+    return true
   }
 
-  // E2E — a fix round first runs the related specs (focus run); the full official run is the slice gate. A full run
-  // that would test exactly the code of the last green full run (check-e2e-fresh) is skipped.
-  if (rounds > 1) {
-    const f = await e2eRun(`focus e2e r${rounds}`, true)
-    if (!f.focusSkipped) {
-      if (infraReason(f)) { stopped = { gate: 'e2e', reason: infraReason(f), output: f.output }; break }
-      if (f.exitCode !== 0) {
-        failing = ['e2e']
-        feedback = `Playwright E2E (focus run: related specs) failed:\n${f.output}`
-        e2eFailures = failureBlock(f.output)
-        await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds} (after focus e2e)`)
-        work = await triage('E2E focus run (related Playwright specs against the Docker stack)', f.output, hints, rounds)
-        await note(`Round ${rounds}`, `- Trigger: E2E focus run RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${f.output.slice(-3000)}\n\`\`\``)
-        continue
-      }
-    }
-  }
-  const fresh = await sh(node('checks/check-e2e-fresh.mjs'), `e2e fresh? r${rounds}`, { gate: true })
-  const e = fresh.exitCode === 0 ? { exitCode: 0, output: `full E2E skipped — ${fresh.output}` } : await e2eRun(`docker up + e2e r${rounds}`)
-  if (infraReason(e)) { stopped = { gate: 'e2e', reason: infraReason(e), output: e.output }; break }
-  if (e.exitCode !== 0) {
-    failing = ['e2e']
-    feedback = `Playwright E2E against the Docker stack failed:\n${e.output}`
-    e2eFailures = failureBlock(e.output)
-    await sh(node('bin/state.mjs', 'set subStep green'), `state → green r${rounds} (after e2e)`)
-    work = await triage('E2E (Playwright against the Docker stack, rebuilt with docker compose up --build)', e.output, hints, rounds)
-    await note(`Round ${rounds}`, `- Trigger: E2E RED\n- To builders: ${work.code ? 'yes' : 'no'} · to tester: ${work.tests.map((t) => t.file).join(', ') || 'no'}\n- Output:\n\n\`\`\`\n${e.output.slice(-3000)}\n\`\`\``)
-    continue
-  }
+  // 1. cheap pre-check (seconds): shell syntax of changed docs and scripts
+  if (await failed('docs', await sh(`${toGreen}${node('checks/check-docs.mjs')}`, `docs syntax r${rounds}`, { gate: true }), 'docs syntax check')) { if (stopped) break; continue }
+  // 2. the related tests of what changed (layers without related tests are skipped)
+  if (await failed('verify', await sh(node('checks/verify.mjs', `--related --slice ${S}`), `verify related r${rounds}`, { gate: true }), 'verify (related tests)')) { if (stopped) break; continue }
+  // 3. the slice's related E2E specs that are not green on the current inputs
+  if (await failed('e2e', await e2eNeeded(`e2e r${rounds}`, true), 'E2E (related specs not green on the current inputs)')) { if (stopped) break; continue }
 
   // From round 2 the reviewer reviews the delta since its last review (snapshot tree), not the whole slice again.
   const snap = rounds > 1 ? await sh(`${node('bin/state.mjs', 'set subStep review')} && ${node('bin/snapshot.mjs', '--show')}`, `state → review r${rounds}`) : await sh(node('bin/state.mjs', 'set subStep review'), `state → review r${rounds}`)
   const tree = ((snap.output || '').match(/TREE ([0-9a-f]{40})/) || [])[1]
   const delta = tree ? ` Delta review: re-check every open finding in the file against the current code, then review only the output of \`${node('bin/snapshot.mjs', '--diff')}\` (the changes since your last review, tree ${tree}, new files included) — not the whole slice again.` : ''
   const flagged = hints.length ? `\n\nThe builders flagged these tests as possibly wrong — judge them under dimension "tests":\n${list(hints)}` : ''
-  const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. Verify and E2E are GREEN. Write ${sliceDir}/review-findings.json with "round": ${rounds}; give every finding a "kind" (defect | hardening, see your rules).${delta} If ${sliceDir}/red-evidence.md has a section "Red by startup only", check those tests under dimension "tests": each must assert real behaviour, not just that the context starts. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
+  const rv = await role('reviewer', `${CTX}\n\nStep 4e — review slice ${S}, round ${rounds}. The uncommitted changes are the slice work: git -C "${A.appDir}" status / diff HEAD. The round's related tests and E2E specs are GREEN (the slice gate runs after a clean review). Write ${sliceDir}/review-findings.json with "round": ${rounds}; give every finding a "kind" (defect | hardening, see your rules).${delta} If ${sliceDir}/red-evidence.md has a section "Red by startup only", check those tests under dimension "tests": each must assert real behaviour, not just that the context starts. Return the findings that are still open with severity high or medium (the same ones as in the file).${flagged}`, `reviewer: ${S} r${rounds}`, REVIEW_SCHEMA)
   const c = await sh(`${node('bin/snapshot.mjs')} >/dev/null; ${node('checks/check-review.mjs', `--slice ${S}`)}`, `check-review r${rounds}`, { gate: true })
   if (infraReason(c)) { stopped = { gate: 'review', reason: infraReason(c), output: c.output }; break }
-  if (c.exitCode === 0) { status = 'DONE'; failing = []; break }
+  if (c.exitCode === 0) {
+    // 4. the slice gate, once the round is clean: every stale layer in full + every E2E spec not green on the current
+    // inputs. Green → close. Red → triage → next round (targeted again).
+    if (await failed('verify', await sh(`${node('bin/state.mjs', 'set subStep green')} && ${node('checks/verify.mjs', '--incremental')}`, `slice gate: verify r${rounds}`, { gate: true }), 'slice gate: verify (stale layers in full)')) { if (stopped) break; continue }
+    if (await failed('e2e', await e2eNeeded(`slice gate r${rounds}`, false), 'slice gate: E2E (every spec not green on the current inputs)')) { if (stopped) break; continue }
+    status = 'DONE'; failing = []; break
+  }
   failing = ['review']
   feedback = `Review findings (open high/medium in ${sliceDir}/review-findings.json):\n${c.output}`
   const open = (rv && rv.open) || []

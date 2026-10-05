@@ -1410,31 +1410,25 @@ wf('workflow red: a builder prompt without the related-tests rule would be caugh
   const be = calls.find((c) => c.opts.label === 'backend: 01_rooms r1');
   return /run only the slice's tests/.test(be.prompt.replace("run only the slice's tests", '')) ? 0 : 1;
 });
-const verifyKinds = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: verify')).map((c) => (/verify\.mjs" --related --slice 01_rooms/.test(c.prompt) ? 'related' : 'full'));
-wf('workflow green: round 1 = full verify only; a fix round = related verify, then full verify', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
-  let n = 0;
-  return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o));
-})(), ({ result, calls }) => (result.status === 'DONE' && verifyKinds(calls).join(',') === 'full,related,full' ? 0 : 1));
-wf('workflow red: related verify RED in a fix round → triaged, no full verify in that round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }), (() => {
-  let n = 0;
-  return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' }
-    : /verify\.mjs" --related/.test(p) ? { exitCode: 1, output: '==== VERIFY (related tests) RED: backend ====' } : ok0(p, o));
-})(), ({ calls }) => (verifyKinds(calls).join(',') === 'full,related' && calls.some((c) => /^triage: verify \(related tests\)/.test(c.opts.label || '')) ? 1 : 0));
-const e2eKinds = (calls) => calls.filter((c) => /stack\.mjs" e2e --detach/.test(c.prompt)).map((c) => (/--focus-slice 01_rooms/.test(c.prompt) ? 'focus' : 'full'));
 const e2eFailsFirst = (extra = () => null) => { let n = 0; return (p, o) => extra(p, o) || (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)); };
-wf('workflow green: round 1 = full E2E; a fix round = focus run, then the full run', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsFirst(),
-  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).join(',') === 'full,focus,full' ? 0 : 1));
-wf('workflow red: focus run RED → triaged, no full run in that round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }), (() => {
-  let n = 0;
-  return (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? (n++ < 2 ? { exitCode: 1, output: 'E2E FAIL' } : { exitCode: 0, output: 'E2E PASS' }) : ok0(p, o));
-})(), ({ calls }) => (e2eKinds(calls).join(',') === 'full,focus' && calls.some((c) => /^triage: E2E focus run/.test(c.opts.label || '')) ? 1 : 0));
-wf('workflow green: focus unsupported (exit 5) → straight to the full official run', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
-  e2eFailsFirst((p) => (/--focus-slice/.test(p) ? { exitCode: 5, output: 'FOCUS UNSUPPORTED: …' } : null)),
-  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).join(',') === 'full,focus,full' && !calls.some((c) => /^triage: E2E focus/.test(c.opts.label || '')) ? 0 : 1));
-wf('workflow green: the full run is skipped when check-e2e-fresh says the code was already tested', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
-  (p, o) => (FRESH_PROBE.test(p) ? { exitCode: 0, output: 'PASS the last full E2E run passed on exactly this code' } : ok0(p, o)),
-  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).length === 0 ? 0 : 1));
-
+const verifyKinds = (calls) => calls.filter((c) => c.opts.label?.startsWith('run:') && /checks\/verify\.mjs" (--related|--incremental)/.test(c.prompt)).map((c) => (/--related --slice 01_rooms/.test(c.prompt) ? 'related' : 'gate'));
+wf('workflow green: every round runs the related verify; the incremental (slice gate) verify only after a clean review', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsFirst(),
+  ({ result, calls }) => (result.status === 'DONE' && verifyKinds(calls).join(',') === 'related,related,gate' ? 0 : 1));
+wf('workflow red: related verify RED → triaged, no slice gate in that round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }),
+  (p, o) => (/verify\.mjs" --related/.test(p) ? { exitCode: 1, output: '==== VERIFY (related tests) RED: backend ====' } : ok0(p, o)),
+  ({ calls }) => (verifyKinds(calls).join(',') === 'related' && calls.some((c) => /^triage: verify \(related tests\)/.test(c.opts.label || '')) ? 1 : 0));
+const e2eKinds = (calls) => calls.filter((c) => /stack\.mjs" e2e --detach/.test(c.prompt)).map((c) => (/--focus 01_rooms/.test(c.prompt) ? 'focus' : 'gate'));
+wf('workflow green: a round runs the related E2E specs (--focus); the slice gate every needed spec', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsFirst(),
+  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).join(',') === 'focus,focus,gate' ? 0 : 1));
+wf('workflow red: the round\'s E2E RED → triaged, no slice gate in that round', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }),
+  (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)),
+  ({ calls }) => (e2eKinds(calls).join(',') === 'focus,focus' && calls.some((c) => /^triage: E2E \(related specs/.test(c.opts.label || '')) ? 1 : 0));
+wf('workflow green: nothing needed anywhere → no stack up, no Playwright, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (/--dry-run/.test(p) && /e2e --needed/.test(p) ? { exitCode: 0, output: 'E2E NOTHING NEEDED: every spec is green on the current inputs' } : ok0(p, o)),
+  ({ result, calls }) => (result.status === 'DONE' && !calls.some((c) => /stack\.mjs" up|e2e --detach/.test(c.prompt)) ? 0 : 1));
+wf('workflow green: nothing needed in the round, specs needed at the slice gate → only the gate runs Playwright', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  (p, o) => (/--dry-run/.test(p) && /--focus 01_rooms/.test(p) ? { exitCode: 0, output: 'E2E NOTHING NEEDED' } : ok0(p, o)),
+  ({ result, calls }) => (result.status === 'DONE' && e2eKinds(calls).join(',') === 'gate' ? 0 : 1));
 const buildersIn = (calls, r) => calls.filter((c) => new RegExp(`^(backend|frontend): 01_rooms r${r}$`).test(c.opts.label || '')).map((c) => c.opts.label.split(':')[0]).sort().join(',');
 const triageSays = (answer) => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) && !n++ ? { exitCode: 1, output: 'E2E FAIL' } : o.label?.startsWith('triage') ? answer : ok0(p, o)); };
 wf('workflow green: triage says backend → only the backend builder runs the fix round', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: 'fix the 500', layers: ['backend'], tests: [] }),
@@ -1525,9 +1519,9 @@ wf('workflow red: tester red prompt without self-check would be caught', 1, wfAr
 });
 wf('workflow red: failed red-check → BLOCKED', 1, wfArgs({ stage: 'green', red: { exitCode: 2, output: 'COMPILE-ERROR' } }), ok0,
   ({ result }) => (result.status === 'BLOCKED' && result.failing.includes('red-check') ? 1 : 0));
-wf('workflow green: verify → e2e → review → DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) => {
-  const order = calls.map((c) => c.prompt).map((p) => (LOOP_VERIFY.test(p) ? 'verify' : /stack\.mjs" e2e-wait/.test(p) ? 'e2e' : /check-review/.test(p) ? 'review' : null)).filter(Boolean);
-  return result.status === 'DONE' && order.join(',') === 'verify,e2e,review' ? 0 : 1;
+wf('workflow green: related verify → round E2E → review → slice gate verify → slice gate E2E → DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ result, calls }) => {
+  const order = calls.map((c) => c.prompt).map((p) => (/verify\.mjs" --related/.test(p) ? 'related' : /verify\.mjs" --incremental/.test(p) ? 'gate-verify' : /e2e --detach --needed --focus/.test(p) ? 'e2e' : /e2e --detach --needed(?! --focus)/.test(p) ? 'gate-e2e' : /check-review/.test(p) ? 'review' : null)).filter(Boolean);
+  return result.status === 'DONE' && order.join(',') === 'related,e2e,review,gate-verify,gate-e2e' ? 0 : 1;
 });
 wf('workflow green: test finding goes to tester, code finding to builders', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
   let reviews = 0;
@@ -1544,15 +1538,14 @@ wf('workflow green: test finding goes to tester, code finding to builders', 0, w
   return result.status === 'DONE' && tester && /rooms\.spec\.ts/.test(tester.prompt) && !/rooms\.spec\.ts/.test(be.prompt) && /npe/.test(be.prompt) && !/npe/.test(tester.prompt) && testFix >= 0 ? 0 : 1;
 });
 const e2eCalls = (calls) => calls.filter((c) => /stack\.mjs" e2e/.test(c.prompt));
-wf('workflow green: official E2E = set subStep e2e && up, then detach, then wait — no subStep change in between', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
+wf('workflow green: E2E = (set subStep e2e && which specs?), then up, detach, wait — no subStep change in between', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => {
   const runs = calls.filter((c) => c.opts.label?.startsWith('run:'));
-  const up = runs.findIndex((c) => /stack\.mjs" up/.test(c.prompt));
-  const det = runs.findIndex((c) => /stack\.mjs" e2e --detach/.test(c.prompt));
-  const wait = runs.findIndex((c) => /stack\.mjs" e2e-wait --max 480/.test(c.prompt));
-  const upP = runs[up]?.prompt || '';
-  const setFirst = upP.indexOf('set subStep e2e') >= 0 && upP.indexOf('set subStep e2e') < upP.indexOf('stack.mjs" up');
-  const noChange = runs.slice(up + 1, wait).every((c) => !/set subStep/.test(c.prompt));
-  return up >= 0 && up < det && det < wait && setFirst && noChange ? 0 : 1;
+  const probe = runs.findIndex((c) => /set subStep e2e/.test(c.prompt) && /e2e --needed --focus 01_rooms --dry-run/.test(c.prompt));
+  const up = runs.findIndex((c, i) => i > probe && /stack\.mjs" up --mode e2e/.test(c.prompt));
+  const det = runs.findIndex((c, i) => i > up && /e2e --detach --needed --focus/.test(c.prompt));
+  const wait = runs.findIndex((c, i) => i > det && /stack\.mjs" e2e-wait --max 480/.test(c.prompt));
+  const noChange = runs.slice(probe + 1, wait).every((c) => !/set subStep/.test(c.prompt));
+  return probe >= 0 && up > probe && det > up && wait > det && noChange && /waiting for E2E \(1\/8\)/.test(runs[wait].opts.label) ? 0 : 1;
 });
 const busyThen = (busyTimes) => { let n = 0; return (p, o) => (/stack\.mjs" e2e/.test(p) ? (n++ < busyTimes ? { exitCode: 3, output: 'STACK BUSY: e2e by pid 42 since x' } : { exitCode: 0, output: 'E2E PASS' }) : ok0(p, o)); };
 const verifyAs = (fn) => (p, o) => (LOOP_VERIFY.test(p) ? fn(p, o) : ok0(p, o));
@@ -1568,7 +1561,7 @@ wf('workflow red: no sentinel twice → STOPPED "verify: runner returned no exit
 wf('workflow green: no sentinel once, then present → normal, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), (() => {
   let n = 0;
   return verifyAs(() => (n++ ? { exitCode: 0, output: 'GREEN' } : { exitCode: 0, output: 'truncated', raw: true }));
-})(), ({ result, calls }) => (result.status === 'DONE' && calls.filter((c) => LOOP_VERIFY.test(c.prompt)).length === 2 ? 0 : 1));
+})(), ({ result, calls }) => (result.status === 'DONE' && calls.filter((c) => /verify\.mjs" --related/.test(c.prompt)).length === 2 ? 0 : 1));
 wf('workflow red: runner timeout 124 → STOPPED "verify: timed out", not rerun, no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 124, output: 'BUILD …' })), ({ result, calls }) =>
     (result.status === 'STOPPED' && result.failing.includes('verify: timed out') && !triaged(calls)
@@ -1582,7 +1575,7 @@ wf('workflow red: close chain without exit code → STOPPED "close: …", slice 
 const waitAnswers = (codes) => { let n = 0; return (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? (() => { const c = codes[Math.min(n++, codes.length - 1)]; return { exitCode: c, output: c === 75 ? 'E2E STILL RUNNING (480s since start)' : c === 4 ? 'E2E WORKER LOST: worker pid 9 is gone' : 'E2E PASS' }; })() : ok0(p, o)); };
 const waits = (calls) => calls.filter((c) => /stack\.mjs" e2e-wait/.test(c.prompt)).length;
 wf('workflow green: long E2E — wait says 75 three times, then 0 → DONE, no triage', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), waitAnswers([75, 75, 75, 0]), ({ result, calls }) =>
-  (result.status === 'DONE' && waits(calls) === 4 && !triaged(calls) ? 0 : 1));
+  (result.status === 'DONE' && waits(calls) === 5 && !triaged(calls) ? 0 : 1));
 wf('workflow red: E2E never finishes → STOPPED "e2e: timed out" after 8 waits, no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), waitAnswers([75]), ({ result, calls }) =>
   (result.status === 'STOPPED' && result.failing.includes('e2e: timed out') && waits(calls) === 8 && !triaged(calls) ? 1 : 0));
 wf('workflow red: E2E worker died → STOPPED "e2e: e2e worker lost", no triage', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), waitAnswers([75, 4]), ({ result, calls }) =>
@@ -1674,6 +1667,24 @@ wf('review green: round 2 reviews only the delta since the last review; round 1 
   };
 })(), ({ result, calls }) => (result.status === 'DONE' && !/Delta review/.test(reviewerPrompt(calls, 1)) && new RegExp(`Delta review.*snapshot\\.mjs" --diff.*tree ${TREE40}`).test(reviewerPrompt(calls, 2))
   && calls.some((c) => /snapshot\.mjs" >\/dev\/null; node .*check-review/.test(runnerCommand(c.prompt))) ? 0 : 1));
+// G5 acceptance in workflow terms
+const readmeRound = () => { let reviews = 0; return (p, o) => {
+  if (/--dry-run/.test(p) && /e2e --needed/.test(p)) return { exitCode: 0, output: 'E2E NOTHING NEEDED' };
+  if (/check-review/.test(p)) return { exitCode: reviews > 1 ? 0 : 1, output: 'INVALID open' };
+  if (o.label?.startsWith('reviewer')) { reviews++; return { open: [{ id: 'R1', severity: 'medium', kind: 'defect', dimension: 'correctness', file: 'README.md', problem: '((cd x)) is arithmetic' }] }; }
+  return ok0(p, o);
+}; };
+wf('G5 green: a README-only fix round — one builder, docs check, related tests, no Docker, no Playwright, delta review, DONE', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), readmeRound(), ({ result, calls }) => {
+  const r2 = calls.filter((c) => / r2\b|r2$| r2 /.test(c.opts.label || ''));
+  return result.status === 'DONE' && buildersIn(calls, 2) === 'backend' && r2.some((c) => /check-docs\.mjs/.test(c.prompt)) && r2.some((c) => /verify\.mjs" --related/.test(c.prompt))
+    && !calls.some((c) => /stack\.mjs" up|e2e --detach/.test(c.prompt)) ? 0 : 1;
+});
+wf('G5 green: one frontend file — only the frontend builder, the round runs the related specs, the gate the rest', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), reviewOn('frontend/src/app/rooms/rooms.ts'), ({ result, calls }) =>
+  (result.status === 'DONE' && buildersIn(calls, 2) === 'frontend' && e2eKinds(calls).join(',') === 'focus,focus,gate' ? 0 : 1));
+wf('G5 red: the slice gate is RED → triage and another round (targeted again)', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }), (() => {
+  let g = 0;
+  return (p, o) => (/verify\.mjs" --incremental/.test(p) ? (g++ ? { exitCode: 0, output: 'GREEN' } : { exitCode: 1, output: '==== VERIFY RED: backend ====' }) : ok0(p, o));
+})(), ({ result, calls }) => (verifyKinds(calls).join(',') === 'related,gate,related,gate' && calls.some((c) => /^triage: slice gate: verify/.test(c.opts.label || '')) && result.status === 'DONE' ? 1 : 0));
 const stopLog = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: log stop')).map((c) => runnerCommand(c.prompt));
 wf('notes green: a STOPPED by a factory command error is logged as factory-false-positive + backlog', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 1, output: "Problem configuring task :jacocoTestReport from command line.\n> Unknown command-line option '--tests'." })),
@@ -1931,7 +1942,7 @@ for (const [name, cmd, want] of [
     let got, note = '';
     try {
       const src = fs.readFileSync(path.join(ENGINE, 'workflows', 'build-slice.js'), 'utf8');
-      const mutated = src.replace("`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up --mode e2e')}`", "node('bin/stack.mjs', 'up --mode e2e')");
+      const mutated = src.replace("`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', `e2e ${sel} --dry-run`)}`", "node('bin/stack.mjs', `e2e ${sel} --dry-run`)");
       if (mutated === src) throw new Error('mutation did not apply — update this case');
       const r = await replayThroughHook('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, mutated);
       got = r.blocked.length ? 1 : 0; note = r.blocked[0] || 'nothing blocked';

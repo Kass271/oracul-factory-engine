@@ -114,7 +114,11 @@ Loop:
       The retry runs the contract sync again, so a `compile error in main|generated` line is repaired by builders, never
       by the tester.
    4. `B` with `stage: "green"`, `red: { exitCode, output: <last 80 lines> }` from the last red-check. With a nonzero
-      exitCode it writes the failure note and returns BLOCKED; otherwise builders → verify → E2E → review, up to 5 fix rounds.
+      exitCode it writes the failure note and returns BLOCKED; otherwise rounds of: builders/tester (only the layer a
+      fix touches) → docs syntax check → related tests → the slice's related E2E specs not green on the current inputs
+      → (delta) review. A clean round runs the **slice gate**: stale layers in full (`verify --incremental`) + every
+      E2E spec not green on the current inputs; green → `close-slice`. Gates green on unchanged inputs are never re-run
+      (gate ledger: `node $E/bin/gates.mjs status`).
       In fix rounds, failures caused by tests and review findings about tests go to the tester; the builders keep the code.
 3. Result `DONE` → one-line progress message to the user, continue.
    Result `STOPPED` → an infrastructure failure, not a code failure: `failing` names it (`<gate>: stack busy |

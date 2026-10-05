@@ -32,8 +32,10 @@ const TRIAGE_SCHEMA = { type: 'object', properties: { code: { type: 'string' }, 
 // Which builders a code fix needs: "unknown" → both; otherwise only the failing layer(s).
 const LAYERS = ['backend', 'frontend']
 const builderLayers = (w) => { const l = (w.layers || []).filter((x) => LAYERS.includes(x)); return l.length ? [...new Set(l)] : LAYERS }
-// Stack wiring has owners (F10): compose files and stub services → backend builder, frontend/nginx.conf → frontend builder.
-const layerOfFile = (f) => (/^backend\//.test(f || '') || /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(f || '') ? 'backend' : /^frontend\//.test(f || '') ? 'frontend' : null)
+// Owners (F10): compose files and stub services → backend builder, frontend/nginx.conf → frontend builder; repository docs
+// (README.md, *.md outside a layer, docs/ other than the factory's own) → backend builder alone — a docs fix never
+// starts both builders.
+const layerOfFile = (f) => (/^backend\//.test(f || '') || /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(f || '') || /^[^/]+\.md$/i.test(f || '') ? 'backend' : /^frontend\//.test(f || '') ? 'frontend' : null)
 const REVIEW_SCHEMA = {
   type: 'object',
   properties: {
