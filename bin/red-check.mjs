@@ -12,7 +12,7 @@
 // Exit 0 = valid RED · 1 = not red (tests pass, missing, or not updated) · 2 = red for the wrong reason
 import fs from 'node:fs';
 import path from 'node:path';
-import { context, flakyPath, parseArgs, run, took } from '../checks/lib/core.mjs';
+import { appendGateRun, context, flakyPath, parseArgs, run, took } from '../checks/lib/core.mjs';
 import { collectTraces, parsePlan } from '../checks/lib/docs.mjs';
 import { analyseRed, recordFlaky, renderEvidence } from '../checks/lib/red.mjs';
 import { layerCommand, relatedTests } from '../checks/lib/related.mjs';
@@ -63,6 +63,7 @@ for (const [layer, p] of Object.entries(compile ? {} : plans)) {
 
 const a = analyseRed({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice, layers, since, changed, compile });
 if (a.flaky.length && ctx.app) recordFlaky(flakyPath(ctx.app), slice, a.flaky);
+appendGateRun(ctx.app, { gate: `red-check:${scope}`, slice, exit: a.verdict === 'RED' ? 0 : a.verdict === 'WRONG-REASON' ? 2 : 1, seconds: Math.round((Date.now() - since) / 1000) });
 const md = renderEvidence(a, { slice, frs: s.frs, scope });
 const out = path.join(ctx.phaseDir, '04_build', slice, 'red-evidence.md');
 fs.mkdirSync(path.dirname(out), { recursive: true });

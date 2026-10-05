@@ -1,0 +1,93 @@
+#!/usr/bin/env node
+// Slice retro (D1) — where the time went, from data, not from a guess. No agent. Writes
+// docs/<phase>/04_build/<slice>/retro.md and prints the five-line summary for the user. Never fails (exit 0).
+//   --slice <s> [--agents "<n> runs, <tokens>"]   (agent counts/tokens are not visible to engine scripts; the
+//                                                 orchestrator may pass them from the workflow result)
+// Sources: timings.jsonl (time per subStep), gate-runs.jsonl (every gate run: duration, input hash → same-input reruns
+// are waste), rounds.md (rounds, triggers), notes.jsonl (interventions, delay classes), factory-issues.jsonl,
+// suite-health.json (slowest tests), the plan and specs (scope size), git (contract and code diff since the green base).
+import fs from 'node:fs';
+import path from 'node:path';
+import { context, factoryIssuesPath, gateRunsPath, notesPath, parseArgs, readJson, readText, run, timingsPath, took } from '../checks/lib/core.mjs';
+import { parsePlan, parseSpecFrs } from '../checks/lib/docs.mjs';
+import { summariseTimings } from '../checks/lib/timing.mjs';
+import { greenBase } from '../checks/lib/compile.mjs';
+
+const args = parseArgs();
+const ctx = context(args);
+const S = args.slice;
+const lines = (p) => (readText(p) || '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+try {
+  if (!ctx.app || !ctx.phaseDir || typeof S !== 'string') throw new Error('--slice <s> and an active app are required');
+  const status = ctx.state?.slices?.[S] || 'IN_PROGRESS';
+  const sliceDir = path.join(ctx.phaseDir, '04_build', S);
+
+  // timeline
+  const tl = summariseTimings(readText(timingsPath(ctx.app)) || '', Date.now()).find((x) => x.slice === S);
+  const total = tl?.total || 0;
+  const pct = (ms) => (total ? `${Math.round((ms / total) * 100)}%` : '–');
+  const timeline = tl ? tl.steps.map((x) => `| ${x.subStep} | ${took(x.ms)} | ${pct(x.ms)} |`) : [];
+
+  // gate runs + waste (the same gate on the same inputs again, after it had passed)
+  const runs = lines(gateRunsPath(ctx.app)).filter((r) => r.slice === S);
+  const seen = new Map();
+  const waste = [];
+  for (const r of runs) {
+    if (!r.hash) continue;
+    const k = `${r.gate}|${r.hash}`;
+    if (seen.has(k) && seen.get(k).exit === 0) waste.push(r);
+    seen.set(k, r);
+  }
+  const wasteS = waste.reduce((a, r) => a + (r.seconds || 0), 0);
+  const byGate = {};
+  for (const r of runs) { const g = r.gate.split(':').slice(0, 2).join(':'); byGate[g] ||= { n: 0, s: 0, red: 0 }; byGate[g].n++; byGate[g].s += r.seconds || 0; if (r.exit) byGate[g].red++; }
+
+  // rounds
+  const rounds = readText(path.join(sliceDir, 'rounds.md')) || '';
+  const triggers = [...rounds.matchAll(/^## (Round \d+)[\s\S]*?- Trigger: ([^\n]+)/gm)].map((m) => `${m[1]}: ${m[2]}`);
+
+  // stops, interventions, factory issues
+  const notes = lines(notesPath(ctx.app)).filter((n) => n.slice === S);
+  const tags = notes.reduce((a, n) => { if (n.tag) a[n.tag] = (a[n.tag] || 0) + 1; return a; }, {});
+  const issues = lines(factoryIssuesPath(ctx.app)).filter((n) => n.slice === S);
+
+  // scope size
+  const plan = (parsePlan(ctx.phaseDir) || []).find((p) => p.slice === S);
+  const specs = parseSpecFrs(ctx.phaseDir);
+  const superseded = new Set((plan?.frs || []).flatMap((f) => (specs.get(f)?.changes || []).flatMap((c) => c.tests)));
+  const base = greenBase(ctx.appDir);
+  const shortstat = base ? run('git', ['-C', ctx.appDir, 'diff', '--shortstat', base]).out.trim() : '';
+  const contractLines = base ? run('git', ['-C', ctx.appDir, 'diff', '--numstat', base, '--', 'api/openapi.yaml']).out.trim().split(/\s+/).slice(0, 2).map(Number).filter((x) => !Number.isNaN(x)).reduce((a, b) => a + b, 0) : 0;
+
+  // slowest tests
+  const health = readJson(path.join(path.dirname(timingsPath(ctx.app)), 'suite-health.json'));
+  const slowest = health ? Object.entries(health.classes || {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, s]) => `${n.split('.').at(-1)} ${Math.round(s)}s`) : [];
+
+  const top = tl ? [...tl.steps].sort((a, b) => b.ms - a.ms).slice(0, 4).map((x) => `${x.subStep} ${pct(x.ms)}`).join(' · ') : 'no timings';
+  const roundsN = (rounds.match(/^## Round \d+/gm) || []).length;
+  const summary = [
+    `${S} ${status} in ${total ? took(total) : '?'} · ${roundsN} round(s)${args.agents ? ` · ${args.agents}` : ''}`,
+    `Time: ${top}`,
+    `Waste: ${wasteS ? `${took(wasteS * 1000)} (${waste.length} run(s) on unchanged, already green inputs)` : 'none measured'} · stops: ${notes.filter((n) => /^STOPPED/.test(n.text)).length}${Object.keys(tags).length ? ` (${Object.entries(tags).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}`,
+    `Slowest: ${slowest.join(', ') || 'no data'}`,
+    `Factory issues logged: ${issues.length}${issues.length ? ' → factory-issues.jsonl' : ''}`,
+  ];
+  const md = [
+    `# Retro — ${S}`, '', `Generated by bin/retro.mjs — ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC. Status: ${status}.`, '',
+    '## Summary', '', '```', ...summary, '```', '',
+    '## Timeline (time per subStep)', '', ...(timeline.length ? ['| subStep | time | share |', '|---|---|---|', ...timeline] : ['no data']), '',
+    '## Gate runs', '', ...(Object.keys(byGate).length ? ['| gate | runs | red | time |', '|---|---|---|---|', ...Object.entries(byGate).map(([g, v]) => `| ${g} | ${v.n} | ${v.red} | ${took(v.s * 1000)} |`)] : ['no data']), '',
+    ...(waste.length ? ['### Waste — the same gate again on unchanged, already green inputs', '', ...waste.map((r) => `- ${r.at} ${r.gate} (${took((r.seconds || 0) * 1000)})`), ''] : []),
+    '## Rounds', '', ...(triggers.length ? triggers.map((t) => `- ${t}`) : ['no rounds recorded']), '',
+    '## Stops and interventions', '', ...(notes.length ? notes.map((n) => `- ${n.at.slice(0, 16)} ${n.tag ? `[${n.tag}] ` : ''}${n.text}`) : ['none']), '',
+    '## Scope size', '', `- FRs: ${plan?.frs.length ?? '?'} (${(plan?.frs || []).join(', ')})`, `- Older tests rewritten ("Changes earlier behaviour"): ${superseded.size}`,
+    `- Contract lines changed since the last finished slice: ${contractLines}`, `- Code since the last finished slice: ${shortstat || 'no data'}`, '',
+    '## Slowest tests', '', ...(slowest.length ? slowest.map((x) => `- ${x}`) : ['no data']), '',
+  ].join('\n');
+  fs.mkdirSync(sliceDir, { recursive: true });
+  fs.writeFileSync(path.join(sliceDir, 'retro.md'), md);
+  console.log(summary.join('\n'));
+} catch (e) {
+  console.log(`retro: not written (${e.message}) — never blocks`);
+}
+process.exit(0);

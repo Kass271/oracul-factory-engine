@@ -69,6 +69,12 @@ export const lastFailuresPath = (app) => path.join(STATE_DIR, 'apps', app, 'last
 export const notesPath = (app) => path.join(STATE_DIR, 'apps', app, 'notes.jsonl'); // interventions + tagged stops
 export const factoryIssuesPath = (app) => path.join(STATE_DIR, 'apps', app, 'factory-issues.jsonl'); // factory backlog
 export const DELAY_TAGS = ['scope', 'app-tests', 'factory-false-positive', 'agent-error', 'infra', 'external-service'];
+export const gateRunsPath = (app) => path.join(STATE_DIR, 'apps', app, 'gate-runs.jsonl'); // every gate run (retro)
+// Append one gate run { gate, exit, seconds, hash? } — informational, never fails the gate.
+export function appendGateRun(app, entry) {
+  if (!app) return;
+  try { fs.mkdirSync(path.dirname(gateRunsPath(app)), { recursive: true }); fs.appendFileSync(gateRunsPath(app), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`); } catch { /* informational */ }
+}
 export const migrationsPath = (app) => path.join(STATE_DIR, 'apps', app, 'migrations.json'); // applied / refused migrations
 // Append a timing record; a logging problem never fails the command that logs.
 export function appendTiming(app, entry) {

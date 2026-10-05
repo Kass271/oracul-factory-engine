@@ -125,7 +125,10 @@ Loop:
       E2E spec not green on the current inputs; green → `close-slice`. Gates green on unchanged inputs are never re-run
       (gate ledger: `node $E/bin/gates.mjs status`).
       In fix rounds, failures caused by tests and review findings about tests go to the tester; the builders keep the code.
-3. Result `DONE` → one-line progress message to the user, continue.
+3. Every slice result (DONE, STOPPED, BLOCKED) → show the user the five-line summary of
+   `node $E/bin/retro.mjs --slice <s> --agents "<agents and tokens from the workflow result>"` (it also writes
+   `04_build/<s>/retro.md`).
+   Result `DONE` → continue with the next slice.
    Result `STOPPED` → an infrastructure failure, not a code failure: `failing` names it (`<gate>: stack busy |
    blocked by guard hook | runner returned no exit code | timed out | e2e worker lost`). Nothing was triaged or
    parked; the slice is still IN_PROGRESS with its code in the working tree. Stop the phase, tell the user the reason

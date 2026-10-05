@@ -12,7 +12,7 @@
 // Writes state/apps/<app>/last-run.json and state.lastVerify. Exit 0 = GREEN, 1 = RED.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, STEPS, context, flakyPath, lastFailuresPath, lastRunPath, loadState, parseArgs, readJson, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
+import { ENGINE, STEPS, appendGateRun, context, flakyPath, lastFailuresPath, lastRunPath, loadState, parseArgs, readJson, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
 import { flakyCases, junitCases, junitFailures, javaTestFile, recordFlaky, vitestFailedFiles } from './lib/red.mjs';
 import { FALLOUT_MEANS, LEAK_MEANS, changedFiles, isolationVerdicts, layerCommand, relatedTests } from './lib/related.mjs';
 import { filesByGroup, gateHash, gateState, recordGates } from './lib/inputs.mjs';
@@ -182,5 +182,6 @@ if (ctx.app && loadState(ctx.app)) {
   saveState(ctx.app, st);
 }
 console.log(`\nverify took ${took(Date.now() - T0)}`);
+appendGateRun(ctx.app, { gate: related ? 'verify:related' : args.quick ? 'verify:quick' : args.incremental ? 'verify:incremental' : 'verify:full', slice: ctx.state?.slice ?? null, exit: failing.length ? 1 : 0, seconds: Math.round((Date.now() - T0) / 1000), hash: tested ? `${tested.backend}:${tested.frontend}` : null, ran: Object.keys(layers) });
 console.log(`\n==== VERIFY ${related ? '(related tests) ' : ''}${result}${failing.length ? `: ${failing.join(' · ')}` : ''} ====`);
 process.exit(failing.length ? 1 : 0);

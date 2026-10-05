@@ -124,7 +124,7 @@ function delayTag(failing) {
 }
 async function logStop(result) {
   const tag = delayTag(result.failing || [])
-  await sh(node('bin/state.mjs', `note ${shArg(`STOPPED ${S}: ${(result.failing || []).join('; ')} — ${String(result.output || '').split('\n').filter(Boolean).slice(-2).join(' / ')}`)} --tag ${tag}${tag === 'factory-false-positive' ? ' --issue' : ''}`), `log stop ${S}`)
+  await sh(`${node('bin/state.mjs', `note ${shArg(`STOPPED ${S}: ${(result.failing || []).join('; ')} — ${String(result.output || '').split('\n').filter(Boolean).slice(-2).join(' / ')}`)} --tag ${tag}${tag === 'factory-false-positive' ? ' --issue' : ''}`)}; ${node('bin/retro.mjs', `--slice ${S}`)}`, `log stop ${S}`)
   return result
 }
 const fenceFor = (cmd) => '`'.repeat(Math.max(3, ...[...String(cmd).matchAll(/`+/g)].map((m) => m[0].length + 1)))
@@ -422,4 +422,5 @@ if (park.exitCode !== 0) {
   await note('Park failed', `- The slice failed after ${rounds} round(s) (${failing.join(', ')}), but parking it failed: ${why}.\n- Not marked BLOCKED; the code is in the working tree as far as the park got. The user decides (continue the slice, or park it).\n- Output:\n\n\`\`\`\n${park.output.slice(-1500)}\n\`\`\``)
   return logStop({ status: 'STOPPED', slice: S, rounds, failing: [...failing, `park: ${why}`], output: park.output.slice(-1500) })
 }
+await sh(node('bin/retro.mjs', `--slice ${S}`), `retro ${S}`)
 return { status: 'BLOCKED', slice: S, rounds, failing, decision: impact.decision, dependents: impact.dependents }

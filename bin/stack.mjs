@@ -36,7 +36,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackHashPath, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
+import { appendGateRun, context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackHashPath, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
 import { FOCUS, SCRATCH, e2eEnv, e2eFocus, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { e2eInputsHash, imageInputsHash } from '../checks/lib/hash.mjs';
 import { failedTests } from '../checks/lib/e2e.mjs';
@@ -257,6 +257,7 @@ switch (cmd) {
     const block = r.code ? failureBlock(readJson(path.join(e2eDir, reportDir, 'results.json')), ctx.appDir) : '';
     console.log(tail(r.out, block ? 15 : 60));
     console.log(`Playwright took ${took(Date.now() - tE)}`);
+    appendGateRun(appName, { gate: `e2e:${kind}${neededFiles ? `:needed(${neededFiles.length})` : ''}`, slice: ctx.state?.slice ?? null, exit: r.code ? 1 : 0, seconds: Math.round((Date.now() - tE) / 1000), hash: tested && !neededFiles ? tested : null });
     if (tested && !neededFiles) writeJson(e2eLastPath(appName), { hash: tested, code: r.code ? 1 : 0, at: new Date().toISOString() });
     // Per-spec gates from the official report: a spec that ran and passed → pass on the hash it ran with.
     if (specHashes) {

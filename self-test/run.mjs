@@ -840,6 +840,34 @@ test('close red: a stale E2E gate stops the close', 1, (sb) => {
 }, (sb, r) => /CLOSE FAILED at "E2E covers the current code"/.test(r.out) || r.out);
 test('close red: unknown slice', 1, (sb) => node(sb, 'bin/close-slice.mjs', ['--slice', '09_x', '--dry-run']));
 
+// ---------------- D1: generated slice retro
+const T = (sec) => new Date(Date.parse('2026-10-04T18:00:00Z') + sec * 1000).toISOString();
+const retroData = (sb) => {
+  const dir = path.join(sb.stateDir, 'apps/fixture');
+  write(path.join(dir, 'timings.jsonl'), [
+    { at: T(0), slice: '01_rooms', from: 'none', to: 'spec' }, { at: T(600), slice: '01_rooms', from: 'spec', to: 'red' },
+    { at: T(1800), slice: '01_rooms', from: 'red', to: 'green' }, { at: T(5400), slice: '01_rooms', from: 'green', to: 'none' },
+  ].map((x) => JSON.stringify(x)).join('\n') + '\n');
+  write(path.join(dir, 'gate-runs.jsonl'), [
+    { at: T(4000), gate: 'e2e:official', slice: '01_rooms', exit: 0, seconds: 1200, hash: 'h1' },
+    { at: T(5000), gate: 'e2e:official', slice: '01_rooms', exit: 0, seconds: 1180, hash: 'h1' },
+    { at: T(3000), gate: 'verify:full', slice: '01_rooms', exit: 1, seconds: 500, hash: 'v1' },
+  ].map((x) => JSON.stringify(x)).join('\n') + '\n');
+  write(path.join(dir, 'notes.jsonl'), JSON.stringify({ at: T(2000), slice: '01_rooms', tag: 'factory-false-positive', text: 'STOPPED 01_rooms: sync: contract invalid' }) + '\n');
+  sb.state({ slices: { '01_rooms': 'DONE', '02_search': 'DONE' } });
+};
+test('retro green: timeline, same-input rerun flagged as waste, stops, five-line summary', 0, (sb) => { retroData(sb); return node(sb, 'bin/retro.mjs', ['--slice', '01_rooms', '--agents', '31 agents, 0.9 M tok']); }, (sb, r) => {
+  const md = sb.read('docs/phase-01_mvp/04_build/01_rooms/retro.md');
+  const checks = [/^01_rooms DONE in 90m 00s · 0 round\(s\) · 31 agents, 0\.9 M tok$/m.test(r.out), /^Time: green 67% · red 22% · spec 11%$/m.test(r.out),
+    /Waste: 19m 40s \(1 run\(s\) on unchanged, already green inputs\)/.test(r.out), /stops: 1 \(factory-false-positive 1\)/.test(r.out),
+    /\| green \| 60m 00s \| 67% \|/.test(md), /### Waste/.test(md), /\| e2e:official \| 2 \| 0 \|/.test(md)];
+  return checks.every(Boolean) || `${checks.join(',')}\n${r.out}`;
+});
+test('retro green: no data → sections say so, exit 0', 0, (sb) => node(sb, 'bin/retro.mjs', ['--slice', '01_rooms']), (sb) => /no data/.test(sb.read('docs/phase-01_mvp/04_build/01_rooms/retro.md')) || 'missing');
+test('retro green: never fails (unknown slice, garbage data)', 0, (sb) => { write(path.join(sb.stateDir, 'apps/fixture/timings.jsonl'), 'garbage\n{'); return node(sb, 'bin/retro.mjs', ['--slice', '99_x']); });
+test('retro red: a failed run is not counted as waste when repeated', 0, (sb) => { retroData(sb); write(path.join(sb.stateDir, 'apps/fixture/gate-runs.jsonl'), [JSON.stringify({ at: T(1), gate: 'verify:full', slice: '01_rooms', exit: 1, seconds: 500, hash: 'v1' }), JSON.stringify({ at: T(2), gate: 'verify:full', slice: '01_rooms', exit: 0, seconds: 500, hash: 'v1' })].join('\n')); return node(sb, 'bin/retro.mjs', ['--slice', '01_rooms']); },
+  (sb, r) => /Waste: none measured/.test(r.out) || r.out);
+
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 test('guard red: write into factory-engine', 2, (sb) => hook(sb, 'guard-edits', W(path.join(ENGINE, 'checks', 'verify.mjs'))));
@@ -1738,9 +1766,9 @@ wf('takeover green: a clean round 2 → DONE, no takeover', 0, wfArgs({ stage: '
 const stopLog = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: log stop')).map((c) => runnerCommand(c.prompt));
 wf('notes green: a STOPPED by a factory command error is logged as factory-false-positive + backlog', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 1, output: "Problem configuring task :jacocoTestReport from command line.\n> Unknown command-line option '--tests'." })),
-  ({ result, calls }) => { const l = stopLog(calls); return result.status === 'STOPPED' && l.length === 1 && /--tag factory-false-positive --issue$/.test(l[0]) ? 0 : 1; });
+  ({ result, calls }) => { const l = stopLog(calls); return result.status === 'STOPPED' && l.length === 1 && /--tag factory-false-positive --issue; node "[^"]*retro\.mjs" --slice 01_rooms$/.test(l[0]) ? 0 : 1; });
 wf('notes green: an infrastructure STOPPED is tagged infra, no backlog entry', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(2),
-  ({ calls }) => { const l = stopLog(calls); return l.length === 1 && /--tag infra$/.test(l[0]) ? 0 : 1; });
+  ({ calls }) => { const l = stopLog(calls); return l.length === 1 && /--tag infra; node /.test(l[0]) && !/--issue/.test(l[0]) ? 0 : 1; });
 wf('notes red: a DONE slice logs no stop', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => (stopLog(calls).length ? 0 : 1));
 for (const c of asyncCases) {
   wfStarted = true;
