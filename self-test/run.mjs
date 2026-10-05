@@ -757,6 +757,15 @@ test('notes green: a stop text with quotes, $ and backticks survives the shell',
   return { code: x.status === 0 && r.text === text ? 0 : 1, out: `${x.stderr} ${r.text}` };
 });
 
+// ---------------- G7: shell syntax in docs — seconds, before any expensive gate
+const docsCheck = (sb, files) => node(sb, 'checks/check-docs.mjs', ['--files', files]);
+test('docs red: a README shell block that does not parse', 1, (sb) => { sb.put('README.md', '# Run\n\n```bash\necho "unclosed\n```\n'); return docsCheck(sb, 'README.md'); },
+  (sb, r) => /README\.md:3: bash -n/.test(r.out) || r.out);
+test('docs red: a .sh script that does not parse', 1, (sb) => { sb.put('scripts/run.sh', 'if true; then\n  echo x\n'); return docsCheck(sb, 'scripts/run.sh'); });
+test('docs green: valid shell blocks (incl. a subshell) parse', 0, (sb) => { sb.put('README.md', '```sh\n(cd backend && ./gradlew test)\n```\n\n```zsh\nfor f in *.md; do echo $f; done\n```\n'); return docsCheck(sb, 'README.md'); },
+  (sb, r) => /2 shell block/.test(r.out) || r.out);
+test('docs green: no shell blocks → PASS', 0, (sb) => { sb.put('README.md', '# Title\n\n```json\n{"a": 1}\n```\n'); return docsCheck(sb, 'README.md'); });
+
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 test('guard red: write into factory-engine', 2, (sb) => hook(sb, 'guard-edits', W(path.join(ENGINE, 'checks', 'verify.mjs'))));
