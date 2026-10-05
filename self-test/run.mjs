@@ -1797,17 +1797,30 @@ for (const [name, expectCode, answer] of [
   } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });
 }
-for (const [name, expectCode, fresh] of [
-  ['workflow green: release reuses a full E2E run that passed on exactly this code — stack up, no new Playwright run', 0, 0],
-  ['workflow red: release runs Playwright when the last full run does not cover the code', 1, 1],
+{
+  const name = 'labels green: E2E waits are labelled "waiting for E2E (n/8)", never like a failure';
+  if (!filter || name.includes(filter)) {
+    let got, note = '';
+    try {
+      const rel = await runWorkflow('finish-and-run.js', relArgs, waitAnswers([75, 0]));
+      const sl = await runWorkflow('build-slice.js', wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), waitAnswers([75, 0]));
+      const labels = [...rel.calls, ...sl.calls].filter((c) => /e2e-wait/.test(c.prompt)).map((c) => c.opts.label);
+      got = labels.length && labels.every((l) => /waiting for E2E \(\d\/8\)$/.test(l)) ? 0 : 1; note = labels.slice(0, 3).join(' | ');
+    } catch (e) { got = 'ERR'; note = String(e); }
+    results.push({ name, ok: got === 0, expectCode: 0, got, note, out: '' });
+  }
+}
+for (const [name, expectCode, nothing] of [
+  ['workflow green: release with every spec green on the current inputs — stack up, no Playwright', 0, true],
+  ['workflow red: release runs Playwright for the specs that are not green', 1, false],
 ]) {
   if (filter && !name.includes(filter)) continue;
   let got, note = '';
   try {
-    const { result, calls } = await runWorkflow('finish-and-run.js', relArgs, (p, o) => (FRESH_PROBE.test(p) ? { exitCode: fresh, output: fresh ? 'INVALID code changed' : 'PASS covered' } : ok0(p, o)));
-    const detached = calls.some((c) => /stack\.mjs" e2e --detach/.test(c.prompt));
-    const upped = calls.some((c) => /stack\.mjs" up/.test(c.prompt));
-    got = result.status === 'GREEN' && upped ? (detached ? 1 : 0) : 'other';
+    const { result, calls } = await runWorkflow('finish-and-run.js', relArgs, (p, o) => (/e2e --detach --needed/.test(p) ? { exitCode: 0, output: nothing ? 'E2E NOTHING NEEDED: every spec is green on the current inputs' : 'NEEDED (2 of 9 specs)\nE2E STARTED' } : ok0(p, o)));
+    const waited = calls.some((c) => /stack\.mjs" e2e-wait/.test(c.prompt));
+    const upped = calls.some((c) => /stack\.mjs" up --mode e2e/.test(c.prompt));
+    got = result.status === 'GREEN' && upped ? (waited ? 1 : 0) : 'other';
     if (got === 'other') note = JSON.stringify(result).slice(0, 300);
   } catch (e) { got = 'ERR'; note = String(e); }
   results.push({ name, ok: got === expectCode, expectCode, got, note, out: '' });

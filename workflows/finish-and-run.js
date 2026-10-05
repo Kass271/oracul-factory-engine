@@ -119,20 +119,21 @@ async function role(name, prompt, label, schema) {
 const E2E_WAITS = 8
 // reuse: when the last official full run passed on exactly this code (check-e2e-fresh), the stack is only brought up
 // (the app stays running for the user) and that run counts — its screenshots and report are already in place.
-async function e2eRun(label, { reuse = false } = {}) {
+// The stack is always brought up (the app stays running for the user); Playwright runs only for the specs that are not
+// green on the current inputs (gate ledger) — after the last slice's gate usually none ("E2E NOTHING NEEDED").
+async function e2eRun(label) {
   const retryBusy = async (cmd, l) => {
     let r = await sh(cmd, l, { gate: true })
     if (infraReason(r) === 'stack busy') { log(`${l}: stack busy — rerunning once`); r = await sh(cmd, `${l} (stack busy, retry)`, { gate: true }) }
     return r
   }
-  const fresh = reuse ? await sh(node('checks/check-e2e-fresh.mjs'), `${label}: last full run still covers the code?`, { gate: true }) : null
   const up = await retryBusy(`${node('bin/state.mjs', 'set subStep e2e')} && ${node('bin/stack.mjs', 'up --mode e2e')}`, `${label}: docker up`)
   if (up.exitCode !== 0) return { ...up, infra: infraReason(up) }
-  if (fresh && fresh.exitCode === 0) return { exitCode: 0, output: `E2E reused — ${fresh.output}`, infra: null }
-  const start = await retryBusy(node('bin/stack.mjs', 'e2e --detach'), `${label}: start Playwright`)
+  const start = await retryBusy(node('bin/stack.mjs', 'e2e --detach --needed'), `${label}: start Playwright (specs not green)`)
   if (start.exitCode !== 0) return { ...start, infra: infraReason(start) }
+  if (/E2E NOTHING NEEDED/.test(start.output)) return { exitCode: 0, output: start.output, infra: null }
   for (let i = 1; i <= E2E_WAITS; i++) {
-    const w = await sh(node('bin/stack.mjs', 'e2e-wait --max 480'), `${label}: wait ${i}`, { gate: true })
+    const w = await sh(node('bin/stack.mjs', 'e2e-wait --max 480'), `${label}: waiting for E2E (${i}/${E2E_WAITS})`, { gate: true })
     if (w.exitCode !== 75) return { ...w, infra: infraReason(w) }
   }
   return { exitCode: 124, output: `E2E still running after ${E2E_WAITS} waits of 480 s`, infra: 'timed out' }
@@ -210,7 +211,7 @@ if (infraStop) {
 
 // ---------------------------------------------------------------- Run + E2E
 phase('Run + E2E')
-let e2e = await e2eRun('docker up + e2e', { reuse: true })
+let e2e = await e2eRun('docker up + e2e')
 for (let r = 1; r < MAX && e2e.exitCode !== 0 && !e2e.infra; r++) {
   e2eFailures = failureBlock(e2e.output)
   await sh(node('bin/state.mjs', 'set subStep green'), `state → green (after e2e r${r})`)
