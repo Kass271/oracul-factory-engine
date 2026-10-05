@@ -45,6 +45,8 @@ Every FR of the slice gets two more lines (a hook and `check-artifacts --stage s
   JSON field, `ApiError.code`, `data-testid`, ordering, count and outbound call this FR adds or changes, read the hits,
   and list each file whose assertion the new behaviour breaks (new sort order, extra calls, new required field, changed
   status…). The tester must update exactly these files in the RED stage; red-check rejects the slice if one is untouched.
+- Doc requirements (README content, commands that must work, files that must exist): specify them for a plain
+  backend test, never for Playwright (`testing-rules` → "Checks of documents").
 - Stack modes: if an FR changes how the Docker stack starts (extra compose files, profiles, stub vs real), write
   `.oracul/stack.json` (format in `factory-engine/checks/lib/stack.mjs`) and name in the spec delta every service and
   route the slice needs (owners: backend-builder → compose files + stub services, frontend-builder → nginx routes);

@@ -139,6 +139,12 @@ broken. The usual test bugs:
 - **Unfinished async work** — a run/job/subscription started by one test must be awaited or cancelled before it ends.
 - **Unreachable expectations** — values that contradict the fixture data or the spec (wrong count, wrong order).
 
+## Checks of documents (README commands, file presence)
+They are **plain tests, never Playwright**: a backend JUnit test without a Spring context that reads `../README.md`
+(and, for commands, runs them in a real shell with `ProcessBuilder("bash", "-c", …)` against a temp dir). A doc check in
+the E2E suite ties every README edit to a Docker rebuild and a full E2E run. A changed doc runs exactly the tests that
+name it (`checks/lib/related.mjs`).
+
 ## Fast, deterministic suites
 Every gate runs the backend suite; a slow or flaky suite slows every slice. `verify` prints the slowest test classes and
 the number of Spring context starts, and records tests that passed only on retry (`state.mjs flaky`).

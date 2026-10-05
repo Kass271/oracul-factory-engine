@@ -3,8 +3,21 @@
 // Related = the tests tagged "@trace" with the slice's FRs + the tests its spec supersedes ("Changes earlier behaviour")
 //         + test files changed in the working tree + test files that failed in the previous run.
 import path from 'node:path';
-import { exists, readJson } from './core.mjs';
-import { collectTraces, parsePlan, parseSpecFrs, testLayer } from './docs.mjs';
+import fs from 'node:fs';
+import { exists, readJson, run } from './core.mjs';
+import { collectTraces, parsePlan, parseSpecFrs, testFiles, testLayer } from './docs.mjs';
+
+// Every changed file in the working tree (app-relative), or [] without git.
+export function changedFiles(appDir) {
+  const g = run('git', ['-C', appDir, 'status', '--porcelain', '--untracked-files=all']);
+  return g.code === 0 ? g.out.split('\n').filter(Boolean).map((l) => l.slice(3).replace(/^.* -> /, '').replace(/^"|"$/g, '')) : [];
+}
+// A changed doc (README.md, docs/…) relates to every test file that names it (G8: doc checks are plain tests).
+export function testsNamingDocs(appDir, docs) {
+  if (!docs.length) return [];
+  const names = [...new Set(docs.map((d) => path.basename(d)))];
+  return testFiles(appDir).filter((f) => { try { const t = fs.readFileSync(f.abs, 'utf8'); return names.some((n) => t.includes(n)); } catch { return false; } }).map((f) => f.rel);
+}
 
 // backend/src/test/java/com/x/FooIT.java → com.x.FooIT (null for anything else)
 export const javaClass = (rel) => (rel.match(/^backend\/src\/test\/java\/(.+)\.java$/) || [])[1]?.replace(/\//g, '.') ?? null;
@@ -15,7 +28,9 @@ export function relatedTests({ appDir, phaseDir, slice, changed = [], failed = [
   if (!s) return null;
   const traces = collectTraces(appDir);
   const specs = parseSpecFrs(phaseDir);
+  const docs = (changed || []).filter((f) => /^docs\//.test(f) || /\.md$/i.test(f));
   const files = new Set([
+    ...testsNamingDocs(appDir, docs),
     ...s.frs.flatMap((f) => (traces.get(f) || []).map((t) => t.rel)),
     ...s.frs.flatMap((f) => (specs.get(f)?.changes || []).flatMap((c) => c.tests)),
     ...(changed || []),

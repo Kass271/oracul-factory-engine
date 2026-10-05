@@ -373,6 +373,16 @@ test('related green: tagged + superseded + changed tests, nothing unrelated', 0,
     && r.e2e.includes('e2e/tests/rooms.spec.ts') && !r.frontend.includes('frontend/src/app/search/search.spec.ts');
   return { code: ok ? 0 : 1, out: JSON.stringify(r) };
 });
+test('related green: a changed README relates to exactly the tests that read it (G8)', 0, (sb) => {
+  sb.put('backend/src/test/java/com/oracul/app/ReadmeTest.java', 'class ReadmeTest { java.nio.file.Path p = java.nio.file.Path.of("../README.md"); }');
+  sb.put('README.md', '# x');
+  const r = relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '02_search', changed: ['README.md'] });
+  return { code: r.backend.join() === 'backend/src/test/java/com/oracul/app/ReadmeTest.java' && r.e2e.length === 0 ? 0 : 1, out: JSON.stringify(r) };
+});
+test('related green: a doc no test names relates to no test', 0, (sb) => {
+  const r = relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '02_search', changed: ['docs/notes.md'] });
+  return { code: r.backend.length === 0 && r.e2e.length === 0 && r.frontend.join() === 'frontend/src/app/search/search.spec.ts' ? 0 : 1, out: JSON.stringify(r) };
+});
 test('related red: unknown slice → null', 1, (sb) => ({ code: relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '09_x' }) ? 0 : 1, out: '' }));
 test('related green: a changed file that no longer exists is left out', 0, (sb) => {
   const r = relatedTests({ appDir: sb.appDir, phaseDir: sb.doc(''), slice: '01_rooms', changed: ['backend/src/test/java/com/oracul/app/GoneIT.java'] });

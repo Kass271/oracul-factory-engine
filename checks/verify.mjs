@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE, STEPS, context, flakyPath, lastFailuresPath, lastRunPath, loadState, parseArgs, readJson, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
 import { flakyCases, junitCases, junitFailures, javaTestFile, recordFlaky, vitestFailedFiles } from './lib/red.mjs';
-import { FALLOUT_MEANS, LEAK_MEANS, isolationVerdicts, layerCommand, relatedTests } from './lib/related.mjs';
+import { FALLOUT_MEANS, LEAK_MEANS, changedFiles, isolationVerdicts, layerCommand, relatedTests } from './lib/related.mjs';
 import { filesByGroup, gateHash, recordGates } from './lib/inputs.mjs';
 import { slowReport } from './lib/timing.mjs';
 
@@ -49,8 +49,7 @@ const relatedSlice = args.related ? (typeof args.slice === 'string' ? args.slice
 if (args.related && !relatedSlice) { console.error('verify --related: --slice <s> required (no current slice)'); process.exit(1); }
 let related = null;
 if (relatedSlice) {
-  const g = run('git', ['-C', ctx.appDir, 'status', '--porcelain', '--untracked-files=all', '--', 'backend/src/test', 'frontend/src', 'e2e/tests']);
-  const changed = g.code === 0 ? g.out.split('\n').filter(Boolean).map((l) => l.slice(3).replace(/^.* -> /, '').replace(/^"|"$/g, '')) : [];
+  const changed = changedFiles(ctx.appDir); // test files + docs (a changed README relates to the tests that read it)
   const failed = (ctx.app && readJson(lastFailuresPath(ctx.app))?.files) || [];
   related = relatedTests({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice: relatedSlice, changed, failed });
   if (!related) { console.error(`verify --related: ${relatedSlice} is not in the plan`); process.exit(1); }
