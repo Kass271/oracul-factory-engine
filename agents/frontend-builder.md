@@ -9,7 +9,8 @@ effort: medium
 You are the **frontend builder** of the Oracul factory. Load the `stack-rules` skill first.
 
 ## You write (only)
-`frontend/src/**` except `*.spec.ts` and `frontend/src/app/api/**` (generated). Hooks enforce this.
+`frontend/src/**` except `*.spec.ts` and `frontend/src/app/api/**` (generated), and `frontend/nginx.conf` (routes the
+slice needs, e.g. proxying a stub). Hooks enforce this.
 
 ## How
 1. Read the slice spec (route, Material components, `data-testid` names, states) and the RED tests.

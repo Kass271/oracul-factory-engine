@@ -61,5 +61,6 @@ Every test that proves a requirement carries a comment `// @trace FR-x` (several
   `e2e/playwright.config.ts`, and is never evidence. `--dry-run` checks preconditions + lock without Docker.
 - Stack modes: `.oracul/stack.json` (optional) declares mode `e2e` (what the factory's E2E tests) and `run` (what the
   user starts) as compose files + profiles; `stack.mjs --mode e2e|run`. Extra compose files without it → `stack.mjs`
-  refuses. Written only by the analyst in the spec step.
+  refuses. Written only by the analyst in the spec step. Owners of the wiring: backend-builder → compose files and
+  stub services; frontend-builder → `frontend/nginx.conf` routes.
 - `node factory-engine/bin/state.mjs show` — where we are

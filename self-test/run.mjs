@@ -1277,6 +1277,17 @@ wf('workflow green: review finding on a backend file → only the backend builde
     return ok0(p, o);
   };
 })(), ({ calls }) => (buildersIn(calls, 2) === 'backend' ? 0 : 1));
+const reviewOn = (file) => (() => { let reviews = 0; return (p, o) => {
+  if (/check-review/.test(p)) return { exitCode: reviews > 1 ? 0 : 1, output: 'INVALID open' };
+  if (o.label?.startsWith('reviewer')) { reviews++; return { open: [{ id: 'R1', severity: 'high', dimension: 'correctness', file, problem: 'stub not wired' }] }; }
+  return ok0(p, o);
+}; })();
+wf('workflow green: a finding on a compose file goes to the backend builder (stack wiring owner)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), reviewOn('docker-compose.e2e.yml'), ({ calls }) => (buildersIn(calls, 2) === 'backend' ? 0 : 1));
+wf('workflow green: a finding on frontend/nginx.conf goes to the frontend builder', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), reviewOn('frontend/nginx.conf'), ({ calls }) => (buildersIn(calls, 2) === 'frontend' ? 0 : 1));
+wf('workflow green: the triage prompt names the stack wiring owners', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsFirst(), ({ calls }) => {
+  const t = calls.find((c) => /^triage/.test(c.opts.label || ''));
+  return t && /compose files and stub services are "backend"/.test(t.prompt) && /nginx\.conf routes are "frontend"/.test(t.prompt) ? 0 : 1;
+});
 wf('workflow green: every round increments the round counter exactly once, with no standalone state call', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: '', tests: [{ file: 'e2e/tests/rooms.spec.ts', problem: 'wrong testid' }] }), ({ calls }) => {
   const cmds = calls.filter((c) => c.opts.label?.startsWith('run:')).map((c) => runnerCommand(c.prompt));
   const incs = cmds.filter((c) => /state\.mjs" round \+1/.test(c)).length;

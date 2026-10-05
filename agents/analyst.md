@@ -46,7 +46,9 @@ Every FR of the slice gets two more lines (a hook and `check-artifacts --stage s
   and list each file whose assertion the new behaviour breaks (new sort order, extra calls, new required field, changed
   status…). The tester must update exactly these files in the RED stage; red-check rejects the slice if one is untouched.
 - Stack modes: if an FR changes how the Docker stack starts (extra compose files, profiles, stub vs real), write
-  `.oracul/stack.json` (format in `factory-engine/checks/lib/stack.mjs`): mode `e2e` = the stack the factory's E2E
+  `.oracul/stack.json` (format in `factory-engine/checks/lib/stack.mjs`) and name in the spec delta every service and
+  route the slice needs (owners: backend-builder → compose files + stub services, frontend-builder → nginx routes);
+  mode `e2e` = the stack the factory's E2E
   tests (deterministic: stubs on), mode `run` = what the user starts. Only you write `stack.json`, in this step (hook-enforced);
   `check-stack` validates it.
 - Contract changes: additive where possible (new operations, new optional fields). Declare every renamed schema,
