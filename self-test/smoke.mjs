@@ -165,9 +165,12 @@ step('REVIEW: a partial backend test run after verify (one test class)', 0, () =
   const x = spawnSync('./gradlew', ['test', '--tests', 'com.oracul.app.todos.TodosApiIT', '--console=plain', '-q'], { cwd: path.join(appDir, 'backend'), env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   return { code: x.status, out: (x.stdout || '') + (x.stderr || '') };
 });
-step('slice close via bin/close-slice.mjs --check-only (as the workflow): full re-verify after the partial run → … → DONE, retro written', 0, () => {
+// Green stays green: a partial test run after the round's full verify rewrites the reports, but the inputs did not
+// change — the close reuses the full GREEN verify (gate ledger) and takes coverage from that full run, never from the
+// partial report (no false coverage drop, no extra full run).
+step('slice close via bin/close-slice.mjs --check-only (as the workflow): reuses the full verify on unchanged inputs, coverage from the ledger → DONE, retro written', 0, () => {
   const r = sh('bin/close-slice.mjs', ['--slice', '01_todos', '--check-only']);
-  if (r.code || !/running a full verify/.test(r.out) || !/CLOSED 01_todos/.test(r.out)) return { code: r.code || 1, out: r.out };
+  if (r.code || !/reusing the full GREEN verify/.test(r.out) || !/backend [\d.]+% \(full run of .*inputs unchanged\)/.test(r.out) || !/CLOSED 01_todos/.test(r.out)) return { code: r.code || 1, out: r.out };
   if (!fs.existsSync(path.join(docs('04_build'), '01_todos', 'retro.md'))) return { code: 1, out: `retro.md missing\n${r.out}` };
   return sh('checks/check-artifacts.mjs', ['--step', '04_build']);
 });
