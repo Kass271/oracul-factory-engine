@@ -1,6 +1,6 @@
 # Oracul factory — round 3 (F1–F7)
 
-Status: **WAITING — implement only when the user says so.** Revised 2026-10-05 after the notes in
+Status: **IMPLEMENTED** on branch `round-4` (commits R1–R19, 2026-10-05). Revised 2026-10-05 after the notes in
 `oracul/docs/for-factory-improvements/` (retro-slice-03, session-2/3 issues, retro diagnostics): F1 and F5 are replaced
 by round 4 (G3/G4); F6 and F7 corrected; F10 added. Implemented together with round 4 (see its run prompt). Written 2026-10-04 after slice 03 of oracul-engine
 (253 min; ~48 of 91 green-stage minutes in E2E; issues list: oracul/docs/for-factory-improvements/issues-phase-02-session-3.md).

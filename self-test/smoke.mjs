@@ -85,6 +85,10 @@ step('Step 2 specs cover every FR + contract valid', 0, () => {
   const a = sh('checks/check-artifacts.mjs', ['--step', '02_specs']);
   return a.code ? a : sh('checks/check-contract.mjs');
 });
+step('Step 2: the real generators accept the contract (check-contract --validate)', 0, () => {
+  const r = sh('checks/check-contract.mjs', ['--validate']);
+  return r.code === 0 && /backend generator accepts/.test(r.out) && /frontend generator accepts/.test(r.out) ? r : { code: r.code || 1, out: r.out };
+});
 
 // ---------------------------------------------------------------- Step 3
 sh('bin/state.mjs', ['set', 'step', '03_plan']);
@@ -161,16 +165,10 @@ step('REVIEW: a partial backend test run after verify (one test class)', 0, () =
   const x = spawnSync('./gradlew', ['test', '--tests', 'com.oracul.app.todos.TodosApiIT', '--console=plain', '-q'], { cwd: path.join(appDir, 'backend'), env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   return { code: x.status, out: (x.stdout || '') + (x.stderr || '') };
 });
-step('slice close as the workflow runs it: verify --reuse-if-fresh → FULL run → artifacts → coverage --update → commit → DONE', 0, () => {
-  const v = sh('checks/verify.mjs', ['--reuse-if-fresh']);
-  if (v.code || !/running a full verify/.test(v.out)) return { code: v.code || 1, out: `expected a full re-verify:\n${v.out}` };
-  for (const [s, a] of [
-    ['checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_todos', '--stage', 'done']],
-    ['checks/check-coverage.mjs', ['--update']],
-    ['bin/commit.mjs', ['--message', `${PHASE} 01_todos: done (FR-1, FR-2)`]],
-    ['bin/state.mjs', ['slice', '01_todos', 'DONE']],
-    ['bin/state.mjs', ['set', 'subStep', 'none']],
-  ]) { const r = sh(s, a); if (r.code) return r; }
+step('slice close via bin/close-slice.mjs --check-only (as the workflow): full re-verify after the partial run → … → DONE, retro written', 0, () => {
+  const r = sh('bin/close-slice.mjs', ['--slice', '01_todos', '--check-only']);
+  if (r.code || !/running a full verify/.test(r.out) || !/CLOSED 01_todos/.test(r.out)) return { code: r.code || 1, out: r.out };
+  if (!fs.existsSync(path.join(docs('04_build'), '01_todos', 'retro.md'))) return { code: 1, out: `retro.md missing\n${r.out}` };
   return sh('checks/check-artifacts.mjs', ['--step', '04_build']);
 });
 step('a second close-time verify with nothing changed reuses the full verify (no extra time)', 0, () => {
@@ -220,6 +218,36 @@ step('E2E: a production change makes the full run stale (check-e2e-fresh says no
   const r = sh('checks/check-e2e-fresh.mjs');
   fs.writeFileSync(f, orig);
   return r;
+});
+// ---- round 4: green stays green (gate ledger, incremental verify, needed E2E)
+step('G3: verify --incremental re-runs only the stale layer (a backend test changed above)', 0, () => {
+  const r = sh('checks/verify.mjs', ['--incremental']);
+  return r.code === 0 && /SKIP\s+frontend: green on the current inputs/.test(r.out) && /== backend:/.test(r.out) ? r : { code: r.code || 1, out: r.out };
+});
+step('G1/G2/G4: a README-only change — images current, nothing needed, every gate still green', 0, () => {
+  fs.appendFileSync(path.join(appDir, 'README.md'), '\n## Smoke\nA docs-only change.\n');
+  const g = sh('bin/gates.mjs', ['status']);
+  const up = sh('bin/stack.mjs', ['up', '--dry-run']);
+  const e = sh('bin/stack.mjs', ['e2e', '--needed', '--dry-run']);
+  const v = sh('checks/verify.mjs', ['--incremental']);
+  const ok = g.code === 0 && /images current — no rebuild/.test(up.out) && /E2E NOTHING NEEDED/.test(e.out) && v.code === 0
+    && /SKIP\s+backend: green/.test(v.out) && /SKIP\s+frontend: green/.test(v.out);
+  return ok ? v : { code: 1, out: [g.out, up.out, e.out, v.out].join('\n----\n') };
+});
+step('G4: one frontend file — only the frontend re-runs; every spec is needed once and recorded; ledger and report agree', 0, () => {
+  const f = path.join(appDir, 'frontend/src/app/app.ts');
+  fs.appendFileSync(f, '\n// smoke: one frontend file\n');
+  const v = sh('checks/verify.mjs', ['--incremental']);
+  if (v.code || !/SKIP\s+backend: green/.test(v.out) || !/== frontend:/.test(v.out)) return { code: v.code || 1, out: v.out };
+  const up = sh('bin/stack.mjs', ['up']);
+  if (up.code || !/image inputs changed/.test(up.out)) return { code: up.code || 1, out: up.out };
+  const e = sh('bin/stack.mjs', ['e2e', '--needed', '--no-up']);
+  const g = sh('bin/gates.mjs', ['status']);
+  const fresh = sh('checks/check-e2e-fresh.mjs');
+  const rep = JSON.parse(fs.readFileSync(path.join(appDir, 'e2e', 'report', 'results.json'), 'utf8'));
+  const specs = (g.out.match(/^\S+\s+e2e:/gm) || []).length;
+  const ok = e.code === 0 && /NEEDED \(\d+ of \d+ specs\)/.test(e.out) && g.code === 0 && fresh.code === 0 && specs > 0 && rep.stats.unexpected === 0;
+  return ok ? e : { code: 1, out: [e.out, g.out, fresh.out].join('\n----\n') };
 });
 step('gate sentinel in real bash: last line is ORACUL_EXIT=<status of the chain>', 0, () => {
   const cmd = `node "${path.join(ENGINE, 'checks', 'check-review.mjs')}" --release && git -C "${appDir}" status --short >/dev/null\necho "ORACUL_EXIT=$?"`;

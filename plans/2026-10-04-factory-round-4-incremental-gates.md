@@ -1,6 +1,6 @@
 # Oracul factory — round 4: incremental gates ("green stays green")
 
-Status: **WAITING — implement only when the user says so.** Written 2026-10-04 from the app session's request
+Status: **IMPLEMENTED** on branch `round-4` (commits R1–R19, 2026-10-05). Written 2026-10-04 from the app session's request
 (`oracul/docs/for-factory-improvements/prompt-incremental-gates.md`, issues 11–13 of `issues-phase-02-session-3.md`).
 Related: `plans/2026-10-04-factory-round-3.md` (F1–F7) — see "Relation to round 3" at the end.
 Revised 2026-10-05 after `retro-slice-03.md`, `slice-retro-diagnostics.md` and the session-2 list: G4 reads E2E results

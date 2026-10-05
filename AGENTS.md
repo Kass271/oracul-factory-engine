@@ -21,15 +21,18 @@ workflows/    build-slice.js (Step 4, stage red | green — red-check runs betwe
 hooks/        hooks.json + session-start · guard-edits (Playwright/Docker only via stack.mjs; official E2E only in subStep e2e)
               post-edit · subagent-stop · stop
 checks/       verify (--related = development loop) + check-traceability · check-coverage · check-contract · check-review
-              check-artifacts · check-e2e-fresh (last full E2E covers the code; slice close) · check-sync (contract sync
-              adds no behaviour; --release: no marker left) · check-stack (stack modes) · gen-traceability
+              check-artifacts · check-e2e-fresh (every E2E spec green on the current inputs) · check-sync (contract
+              sync adds no behaviour; --release: no marker left) · check-stack (stack modes) · check-docs (shell syntax
+              of changed docs) · gen-traceability
               manifest/artifacts.manifest.json
               lib/ (core, docs parsers, red analysis + FLAKY, lock = stack lock, e2e = scratch/focus env + failure block,
               related = related tests of a slice + FALLOUT/LEAK, timing = subStep timings + slowest tests, hash = image/E2E
-              inputs, compile = compile-only runs + labels, openapi = contract readers, stack = stack modes)
+              inputs, compile = compile-only runs + labels, openapi = contract readers, stack = stack modes,
+              inputs = input groups + gate ledger (gates.json), coverage = report readers)
 bin/          state.mjs (only state writer; timings, flaky) · env-check · scaffold · red-check (--scope slice) · commit
               compile-check (compile only, labelled diagnostics; contract sync + older-test listing)
               migrate (existing apps → current scaffold, at slice boundaries; sets speed, contract)
+              gates (ledger status) · close-slice (the one way to DONE) · snapshot (delta review) · retro (slice retro)
               stack (Docker + E2E; up/down/e2e hold the stack lock; up skips the build when image inputs are unchanged;
               e2e --detach + e2e-wait = official run beyond the 10-min runner limit; e2e --scratch = tester's scoped run;
               e2e --focus-slice = a fix round's related specs)
@@ -50,10 +53,12 @@ state/        runtime state of generated apps (gitignored)
 Set in `agents/*.md` (model, effort) and in the workflows' `ROLE_MODEL` / agent options — every agent call names its
 model, so nothing depends on the session's model. The integrity self-test enforces it.
 
-## Speed principle
-Related tests while developing (red-check --scope slice, verify --related, builder loops, focus E2E); the whole suite
-once when the slice works (full verify + full E2E, proven at close by --reuse-if-fresh and check-e2e-fresh). A
-development-loop shortcut never counts as the slice gate.
+## Speed principle — green stays green
+Related tests while developing (red-check --scope slice, verify --related, builder loops, related E2E specs); the slice
+gate once when the round is clean (verify --incremental + every E2E spec not green on the current inputs). The gate
+ledger (`state/apps/<app>/gates.json`, checks/lib/inputs.mjs) records each gate on the hash of its inputs; a gate green
+on unchanged inputs is never re-run. Every file belongs to a group; unknown files are shared (input of every gate).
+A development-loop shortcut never counts as the slice gate; `bin/close-slice.mjs` is the only way to DONE.
 
 ## Hard rules
 1. **Never weaken a check.** If a check is wrong, fix it so it is *right*, and prove it with a red and a green case.
