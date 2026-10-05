@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE, Report, STEPS, context, exists, parseArgs, readJson, readText, run } from './lib/core.mjs';
 import { allRequirements, frsOf, hasCycle, isApproved, parsePlan, parseRequirements, parseSpecFrs, parseSpecs, testLayer } from './lib/docs.mjs';
+import { allGates, gateState, readLedger } from './lib/inputs.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -100,6 +101,13 @@ const RULES = {
     return !open.length || `${open.length} open high/medium finding(s)`;
   },
   playwrightGreen: (p) => {
+    // Round 4: with per-spec gates the ledger is the record (the last official run may have covered only some specs).
+    if (ctx.app && Object.keys(readLedger(ctx.app).gates || {}).some((k) => k.startsWith('e2e:'))) {
+      const { groups, gates } = allGates(ctx.appDir);
+      const specs = gates.filter((g) => g.startsWith('e2e:'));
+      const bad = specs.filter((g) => gateState(ctx.appDir, ctx.app, g, groups).state !== 'green');
+      return (specs.length && !bad.length) || (specs.length ? `${bad.length} E2E spec(s) not green on the current inputs: ${bad.slice(0, 5).map((g) => g.slice(4)).join(', ')}` : 'no E2E spec');
+    }
     const s = readJson(p)?.stats;
     if (!s) return 'not a Playwright JSON report';
     if (s.unexpected > 0) return `${s.unexpected} E2E test(s) failed`;

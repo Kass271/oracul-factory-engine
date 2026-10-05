@@ -1132,6 +1132,39 @@ test('verify green: --reuse-if-fresh reuses when both layer gates are green on t
 test('verify red: --reuse-if-fresh runs a full verify when a layer gate is stale', 1, (sb) => { greenNow(sb); sb.put('frontend/src/app/x.ts', 'x'); return reuse(sb); },
   (sb, r) => /a layer gate is not green on the current inputs \(frontend\)/.test(r.out) || r.out);
 
+// ---------------- G4: E2E only for specs not green on the current inputs; readers use the ledger
+const neededPlan = (sb, extra = []) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); return node(sb, 'bin/stack.mjs', ['e2e', '--needed', '--dry-run', ...extra]); };
+test('needed green: no ledger → every spec is needed, filters anchored', 0, (sb) => { sb.put('e2e/tests/other.spec.ts', '// o'); return neededPlan(sb); },
+  (sb, r) => (/NEEDED \(2 of 2 specs\)/.test(r.out) && /npx playwright test \/other\\\.spec\\\.ts\$ \/rooms\\\.spec\\\.ts\$/.test(r.out)) || r.out);
+test('needed green: every spec green on the current inputs → NOTHING NEEDED, no lock taken', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); recordGatesFor(sb, ['e2e:rooms.spec.ts']); return node(sb, 'bin/stack.mjs', ['e2e', '--needed', '--dry-run']); },
+  (sb, r) => (/E2E NOTHING NEEDED/.test(r.out) && !fs.existsSync(LOCK(sb))) || r.out);
+test('needed green: only a changed spec is needed', 0, (sb) => {
+  sb.put('e2e/tests/other.spec.ts', '// o'); sb.put('e2e/playwright.config.ts', TEMPLATE_PW); recordGatesFor(sb, ['e2e:rooms.spec.ts', 'e2e:other.spec.ts']);
+  sb.put('e2e/tests/other.spec.ts', '// o changed'); return node(sb, 'bin/stack.mjs', ['e2e', '--needed', '--dry-run']);
+}, (sb, r) => (/NEEDED \(1 of 2 specs\): other\.spec\.ts/.test(r.out)) || r.out);
+test('needed red: a production change makes every spec needed', 0, (sb) => {
+  sb.put('e2e/tests/other.spec.ts', '// o'); sb.put('e2e/playwright.config.ts', TEMPLATE_PW); recordGatesFor(sb, ['e2e:rooms.spec.ts', 'e2e:other.spec.ts']);
+  sb.put('frontend/src/app/x.ts', 'x'); return node(sb, 'bin/stack.mjs', ['e2e', '--needed', '--dry-run']);
+}, (sb, r) => /NEEDED \(2 of 2 specs\)/.test(r.out) || r.out);
+test('needed green: --focus keeps only the slice\'s related specs among the needed ones', 0, (sb) => { sb.put('e2e/tests/other.spec.ts', '// o'); return neededPlan(sb, ['--focus', '01_rooms']); },
+  (sb, r) => (/NEEDED \(1 of 2 specs\): rooms\.spec\.ts/.test(r.out)) || r.out);
+test('e2e fresh red: a new spec without a ledger entry', 1, (sb) => { recordGatesFor(sb, ['e2e:rooms.spec.ts']); sb.put('e2e/tests/new.spec.ts', '// n'); return node(sb, 'checks/check-e2e-fresh.mjs'); },
+  (sb, r) => /new\.spec\.ts \(never\)/.test(r.out) || r.out);
+test('e2e fresh green: every spec green on the current inputs (ledger)', 0, (sb) => { recordGatesFor(sb, ['e2e:rooms.spec.ts']); return node(sb, 'checks/check-e2e-fresh.mjs'); }, (sb, r) => /gate ledger/.test(r.out) || r.out);
+test('e2e fresh red: a spec green on older inputs', 1, (sb) => { recordGatesFor(sb, ['e2e:rooms.spec.ts']); sb.put('backend/src/main/java/X.java', 'class X {}'); return node(sb, 'checks/check-e2e-fresh.mjs'); });
+test('artifacts green: the E2E record comes from the ledger (report covered only part of the suite)', 0, (sb) => {
+  recordGatesFor(sb, ['e2e:rooms.spec.ts']); sb.edit('e2e/report/results.json', '"unexpected": 0', '"unexpected": 1');
+  return node(sb, 'checks/check-artifacts.mjs', ['--step', '05_release', '--only', 'e2e/report']);
+});
+test('artifacts red: a spec not green on the current inputs fails the E2E record', 1, (sb) => { recordGatesFor(sb, ['e2e:rooms.spec.ts']); sb.put('e2e/tests/rooms.spec.ts', '// @trace FR-1\n// changed'); return node(sb, 'checks/check-artifacts.mjs', ['--step', '05_release', '--only', 'e2e/report']); });
+test('traceability red: a spec red in the ledger makes its FR ✘', 1, (sb) => {
+  lastRunOkAt(sb); write(LEDGER(sb), JSON.stringify({ gates: { 'e2e:rooms.spec.ts': { hash: gateHash(sb.appDir, 'e2e:rooms.spec.ts'), result: 'fail', at: 'x' } } }));
+  sb.edit('backend/src/test/java/com/oracul/app/rooms/RoomsApiIT.java', '@trace FR-1', 'no tag');
+  return node(sb, 'checks/gen-traceability.mjs');
+});
+test('ledger red: a failed run with a stale report records failures, never a stale pass', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); fakePw(sb, 50, 1); node(sb, 'bin/stack.mjs', ['e2e', '--no-up']); return { code: 0, out: '' }; },
+  (sb) => (JSON.parse(fs.readFileSync(LEDGER(sb), 'utf8')).gates['e2e:rooms.spec.ts'].result === 'fail') || 'stale pass recorded');
+
 // lock library (async)
 const asyncTests = [];
 const atest = (name, expectCode, fn) => { if (!filter || name.includes(filter)) asyncTests.push({ name, expectCode, fn }); };

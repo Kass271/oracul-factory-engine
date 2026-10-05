@@ -7,11 +7,23 @@
 // Exit 0 = fresh · 1 = stale, failed or missing.
 import { Report, context, e2eLastPath, parseArgs, readJson } from './lib/core.mjs';
 import { e2eInputsHash } from './lib/hash.mjs';
+import { allGates, gateState, readLedger } from './lib/inputs.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
 const r = new Report('e2e fresh');
 if (!ctx.appDir || !ctx.app) { r.invalid('no app selected'); process.exit(r.finish()); }
+// Round 4: the per-spec gate ledger, when it has E2E entries — every spec on disk green on its current inputs.
+const ledger = readLedger(ctx.app).gates || {};
+if (Object.keys(ledger).some((k) => k.startsWith('e2e:'))) {
+  const { groups, gates } = allGates(ctx.appDir);
+  const specs = gates.filter((g) => g.startsWith('e2e:'));
+  const bad = specs.map((g) => [g, gateState(ctx.appDir, ctx.app, g, groups)]).filter(([, st]) => st.state !== 'green');
+  if (!specs.length) r.missing('no E2E spec found under e2e/tests');
+  else if (bad.length) r.invalid(`${bad.length} of ${specs.length} E2E spec(s) not green on the current inputs: ${bad.slice(0, 8).map(([g, st]) => `${g.slice(4)} (${st.state})`).join(', ')}${bad.length > 8 ? ' …' : ''}`);
+  else r.pass(`all ${specs.length} E2E specs green on the current inputs (gate ledger)`);
+  process.exit(r.finish());
+}
 const rec = readJson(e2eLastPath(ctx.app));
 if (!rec) {
   if (args['allow-missing']) r.warn('no full E2E run recorded (app built before e2e-last.json existed) — not checked');

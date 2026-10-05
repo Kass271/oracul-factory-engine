@@ -7,6 +7,7 @@ import path from 'node:path';
 import { context, exists, lastRunPath, listPhases, parseArgs, readJson, readText, today } from './lib/core.mjs';
 import { allRequirements, collectTraces, frsOf, parsePlan, parseSpecs } from './lib/docs.mjs';
 import { junitCases } from './lib/red.mjs';
+import { allGates, gateState, readLedger } from './lib/inputs.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -45,6 +46,15 @@ const walkSuites = (s) => {
   (s.suites || []).forEach(walkSuites);
 };
 if (pw) (pw.suites || []).forEach(walkSuites);
+// Round 4: E2E per spec from the gate ledger (each entry counts only on its current inputs); it overrides the report,
+// which may be from a run that covered only some specs.
+if (ctx.app && Object.keys(readLedger(ctx.app).gates || {}).some((k) => k.startsWith('e2e:'))) {
+  const { groups, gates } = allGates(ctx.appDir);
+  for (const g of gates.filter((x) => x.startsWith('e2e:'))) {
+    const st = gateState(ctx.appDir, ctx.app, g, groups).state;
+    results.set(`e2e/tests/${g.slice(4)}`, st === 'green' ? 'pass' : 'fail');
+  }
+}
 
 const lastRun = readJson(lastRunPath(ctx.app || 'fixture')) || readJson(args['last-run'] || '') || {};
 const layerOk = (layer) => lastRun.layers?.[layer]?.exit === 0;

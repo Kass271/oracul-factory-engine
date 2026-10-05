@@ -22,6 +22,10 @@
 //           specs that failed last time (checks/lib/e2e.mjs e2eFocus); writes e2e/report-focus + test-results-focus,
 //           never official evidence. Exit 5 FOCUS UNSUPPORTED (config without E2E_REPORT_DIR/E2E_OUTPUT_DIR — run the
 //           official full E2E instead), exit 6 FOCUS EMPTY (nothing to focus on — run the official full E2E).
+//   e2e --needed [--focus <slice>] [--detach]  OFFICIAL run of only the specs that are not green on the current inputs
+//           (gate ledger, checks/lib/inputs.mjs); with --focus, only those among the slice's related specs, the
+//           failed ones and the changed spec files (a fix round). Nothing needed → "E2E NOTHING NEEDED", exit 0,
+//           nothing started. Each spec it runs is recorded in gates.json.
 //   An official full run records { hash of the tested inputs, exit code } in state/apps/<app>/e2e-last.json
 //   (checks/check-e2e-fresh.mjs compares it with the current code).
 //   --lock-wait <s>  default 60 (120 for --scratch) · --dry-run  check preconditions + lock, print the plan, no Docker
@@ -36,7 +40,8 @@ import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackHashPa
 import { FOCUS, SCRATCH, e2eEnv, e2eFocus, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { e2eInputsHash, imageInputsHash } from '../checks/lib/hash.mjs';
 import { failedTests } from '../checks/lib/e2e.mjs';
-import { filesByGroup, gateHash, recordGates, specFiles } from '../checks/lib/inputs.mjs';
+import { allGates, filesByGroup, gateHash, gateState, recordGates, specFiles } from '../checks/lib/inputs.mjs';
+import { changedFiles } from '../checks/lib/related.mjs';
 import { acquire, alive } from '../checks/lib/lock.mjs';
 import { STACK_CONFIG, composeArgs, extraComposeFiles, loadStackConfig, projectName } from '../checks/lib/stack.mjs';
 
@@ -58,6 +63,7 @@ function ambiguity() {
 const scratch = !!args.scratch;
 const focusSlice = typeof args['focus-slice'] === 'string' ? args['focus-slice'] : null;
 const kind = scratch ? 'scratch' : focusSlice ? 'focus' : 'official';
+const needed = !!args.needed && !scratch && !focusSlice; // official, scoped to the specs not green on the current inputs
 const lockWait = args['lock-wait'] !== undefined ? Number(args['lock-wait']) : scratch ? 120 : 60;
 const appName = ctx.app || path.basename(ctx.appDir);
 const RUN = { status: e2eRunPath(appName, 'json'), log: e2eRunPath(appName, 'log') };
@@ -135,7 +141,7 @@ function preconditions() {
 async function detach() {
   writeJson(RUN.status, { state: 'starting', startedAt: new Date().toISOString() });
   const fd = fs.openSync(RUN.log, 'w');
-  const pass = ['app', 'app-dir', 'phase', 'lock-wait', 'focus-slice'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, String(args[k])] : []));
+  const pass = ['app', 'app-dir', 'phase', 'lock-wait', 'focus-slice', 'needed', 'focus'].flatMap((k) => (args[k] !== undefined ? [`--${k}`, String(args[k])] : []));
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'e2e', '--worker', '--no-up', ...pass], { detached: true, stdio: ['ignore', fd, fd], env: process.env });
   child.unref();
   fs.closeSync(fd);
@@ -210,12 +216,27 @@ switch (cmd) {
       if (!focusFiles.length) { console.log(`FOCUS EMPTY: no related or failed E2E spec for ${focusSlice} — run the official full E2E`); process.exit(6); }
       console.log(`FOCUS ${focusSlice}: ${focusFiles.join(' ')}`);
     }
+    let neededFiles = null;
+    if (needed) {
+      const { groups, gates } = allGates(ctx.appDir);
+      let list = gates.filter((g) => g.startsWith('e2e:') && gateState(ctx.appDir, appName, g, groups).state !== 'green').map((g) => g.slice(4));
+      if (typeof args.focus === 'string') {
+        const changedSpecs = changedFiles(ctx.appDir).filter((f) => /^e2e\/tests\//.test(f)).map((f) => f.slice('e2e/tests/'.length));
+        const focusSet = new Set([...e2eFocus({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, slice: args.focus }), ...changedSpecs]);
+        list = list.filter((x) => focusSet.has(x));
+      }
+      if (!list.length) { console.log(`E2E NOTHING NEEDED: every ${typeof args.focus === 'string' ? 'related ' : ''}spec is green on the current inputs`); process.exit(0); }
+      neededFiles = list;
+      console.log(`NEEDED (${list.length} of ${gates.filter((g) => g.startsWith('e2e:')).length} specs): ${list.join(' ')}`);
+    }
     if (args.detach && !args['dry-run']) await detach();
     const worker = !!args.worker;
     const l = await locked(scratch ? 'e2e --scratch' : focusSlice ? 'e2e --focus' : 'e2e', () => worker && writeJson(RUN.status, { state: 'busy', pid: process.pid }));
     if (worker) writeJson(RUN.status, { state: 'running', pid: process.pid, startedAt: new Date().toISOString() });
     const env = e2eEnv({ appDir: ctx.appDir, phaseDir: ctx.phaseDir, kind });
-    const pwArgs = ['playwright', 'test', ...(scratch ? filterArgs(args.grep) : focusSlice ? focusFiles : [])];
+    // Playwright file filters are regular expressions on the path: anchor each needed spec ("/<spec>$").
+    const anchored = (f) => `/${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
+    const pwArgs = ['playwright', 'test', ...(scratch ? filterArgs(args.grep) : focusSlice ? focusFiles : neededFiles ? neededFiles.map(anchored) : [])];
     const override = process.env.ORACUL_E2E_CMD ? JSON.parse(process.env.ORACUL_E2E_CMD) : null;
     if (args['dry-run']) {
       console.log(`DRY RUN (lock held): ${args['no-up'] ? '' : `docker ${composeCmd('up', ['up', '-d', '--build']).join(' ')} && `}npx ${pwArgs.join(' ')}`);
@@ -236,16 +257,25 @@ switch (cmd) {
     const block = r.code ? failureBlock(readJson(path.join(e2eDir, reportDir, 'results.json')), ctx.appDir) : '';
     console.log(tail(r.out, block ? 15 : 60));
     console.log(`Playwright took ${took(Date.now() - tE)}`);
-    if (tested) writeJson(e2eLastPath(appName), { hash: tested, code: r.code ? 1 : 0, at: new Date().toISOString() });
+    if (tested && !neededFiles) writeJson(e2eLastPath(appName), { hash: tested, code: r.code ? 1 : 0, at: new Date().toISOString() });
     // Per-spec gates from the official report: a spec that ran and passed → pass on the hash it ran with.
     if (specHashes) {
-      const rep = readJson(path.join(e2eDir, reportDir, 'results.json'));
-      const ran = new Set(), failed = new Set(failedTests(rep).map((t) => t.file));
+      // Only a report this run wrote counts; a failed run without a recorded failure is inconsistent → every spec it
+      // was meant to run counts as failed (fail-safe, never a stale "pass").
+      const repFile = path.join(e2eDir, reportDir, 'results.json');
+      let rep = null;
+      try { if (fs.statSync(repFile).mtimeMs >= tE - 1000) rep = readJson(repFile); } catch { /* no report */ }
+      if (!rep || (r.code && !failedTests(rep).length)) {
+        const meant = neededFiles || Object.keys(specHashes);
+        recordGates(appName, Object.fromEntries(meant.filter((sp) => specHashes[sp]).map((sp) => [`e2e:${sp}`, { hash: specHashes[sp], result: r.code ? 'fail' : 'pass' }])));
+        rep = null;
+      }
+      const ran = new Set(), failed = new Set(rep ? failedTests(rep).map((t) => t.file) : []);
       const walk = (s) => { for (const sp of s.specs || []) if (sp.file) ran.add(sp.file); (s.suites || []).forEach(walk); };
       (rep?.suites || []).forEach((s) => { if (s.file) ran.add(s.file); walk(s); });
       const entries = {};
-      for (const sp of [...ran].filter((x) => specHashes[x])) entries[`e2e:${sp}`] = { hash: specHashes[sp], result: failed.has(sp) || r.code && !rep ? 'fail' : 'pass' };
-      if (Object.keys(entries).length) recordGates(appName, entries);
+      for (const sp of [...ran].filter((x) => specHashes[x])) entries[`e2e:${sp}`] = { hash: specHashes[sp], result: failed.has(sp) ? 'fail' : 'pass' };
+      if (rep && Object.keys(entries).length) recordGates(appName, entries);
     }
     const label = scratch ? 'SCRATCH ' : focusSlice ? 'FOCUS ' : '';
     const note = scratch ? ' (not evidence — the workflow E2E step decides)' : focusSlice ? ' (related specs only — the full E2E run is the slice gate)' : '';
