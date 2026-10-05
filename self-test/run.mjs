@@ -1260,7 +1260,8 @@ wf('workflow green: every round increments the round counter exactly once, with 
   return incs === 2 && standalone <= 3 ? 0 : 1;
 });
 // stage red with the contract sync (stub compile results)
-const syncAnswer = ({ compiles = [1, 0], guard = [0], unlisted = false } = {}) => { let c = 0, g = 0; return (p, o) => {
+const syncAnswer = ({ compiles = [1, 0], guard = [0], unlisted = false, valid = [0] } = {}) => { let c = 0, g = 0, v = 0; return (p, o) => {
+  if (/check-contract\.mjs" --validate/.test(p)) { const code = valid[Math.min(v++, valid.length - 1)]; return { exitCode: code, output: code ? 'INVALID  validate: the backend generator rejects api/openapi.yaml — mapping values are not allowed' : 'PASS validate' }; }
   if (/compile-check\.mjs" --stage main/.test(p)) { const code = compiles[Math.min(c++, compiles.length - 1)]; return { exitCode: code, output: code ? 'FAIL     backend main\nCOMPILE ERRORS: 3 (main 3)' : 'COMPILE OK' }; }
   if (/check-sync\.mjs"/.test(p)) { const code = guard[Math.min(g++, guard.length - 1)]; return { exitCode: code, output: `SYNC VIOLATIONS: ${code}` }; }
   if (/--require-listed/.test(p)) return unlisted ? { exitCode: 1, output: 'UNLISTED backend/src/test/java/com/oracul/app/old/OldIT.java — …' } : { exitCode: 0, output: 'COMPILE OK' };
@@ -1282,6 +1283,17 @@ wf('workflow red: stage red — the sync makes no progress → STOPPED "sync: �
   (result.status === 'STOPPED' && /^sync: no progress/.test(result.failing[0]) && !labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 1 : 0));
 wf('workflow red: stage red — check-sync keeps rejecting → STOPPED, no tester', 1, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [1, 0], guard: [2] }), ({ result, calls }) =>
   (result.status === 'STOPPED' && !labelsOf(calls).some((l) => /^tester: red/.test(l)) ? 1 : 0));
+wf('workflow green: an invalid contract goes to the analyst once, then the sync continues', 0, wfArgs({ stage: 'red' }), syncAnswer({ valid: [1, 0], compiles: [0] }), ({ result, calls }) => {
+  const L = labelsOf(calls);
+  const a = L.findIndex((l) => /^analyst: repair contract 01_rooms$/.test(l)), t = L.findIndex((l) => /^tester: red/.test(l));
+  return !result.status && a >= 0 && t > a && !L.some((l) => /sync 01_rooms r1/.test(l)) && /mapping values/.test(calls[a].prompt) ? 0 : 1;
+});
+wf('workflow red: the contract stays invalid after one repair → STOPPED, no builder, no tester', 1, wfArgs({ stage: 'red' }), syncAnswer({ valid: [1] }), ({ result, calls }) => {
+  const L = labelsOf(calls);
+  return result.status === 'STOPPED' && /^sync: contract invalid after one analyst repair/.test(result.failing[0]) && L.filter((l) => /^analyst: repair contract/.test(l)).length === 1
+    && !L.some((l) => /^(backend|frontend): sync|^tester: red/.test(l)) ? 1 : 0;
+});
+wf('workflow green: a valid contract → no analyst repair', 0, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [0] }), ({ calls }) => (!labelsOf(calls).some((l) => /^analyst: repair contract/.test(l)) ? 0 : 1));
 wf('workflow green: stage red retry (redFeedback) runs the sync again — problem 6', 0, wfArgs({ stage: 'red', redFeedback: 'WRONG-REASON: backend: compile error in main (3)' }), syncAnswer(), ({ calls }) =>
   (labelsOf(calls).some((l) => /^backend: sync 01_rooms r1$/.test(l)) && !labelsOf(calls).some((l) => /^analyst: spec/.test(l)) ? 0 : 1));
 wf('workflow green: unlisted older tests → the analyst lists them before the tester starts', 0, wfArgs({ stage: 'red' }), syncAnswer({ compiles: [0], unlisted: true }), ({ calls }) => {

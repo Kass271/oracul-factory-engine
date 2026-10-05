@@ -185,10 +185,19 @@ No logic, no new fields, no deletions, no tests, no contract — ${node('checks/
 const countOf = (re, out) => { const m = String(out || '').match(re); return m ? Number(m[1]) : null }
 // → null when production code compiles (or the contract did not change), else the STOPPED result of stage red.
 async function contractSync() {
-  let compile = await sh(node('bin/compile-check.mjs', '--stage main --if-contract-changed'), `compile main ${S}`, { gate: true })
-  if (compile.exitCode === 0) return null
   const stop = (why, output) => note('Contract sync stopped', `- ${why}\n- No tester ran; nothing parked. The user decides (a large or undeclared contract break).\n- Output:\n\n\`\`\`\n${String(output).slice(-2500)}\n\`\`\``)
     .then(() => ({ stage: 'red', status: 'STOPPED', slice: S, failing: [`sync: ${why}`], output: String(output).slice(-1500) }))
+  // An invalid contract is the analyst's, not the builders': one repair, then STOPPED (slice 03: unquoted YAML).
+  let valid = await sh(node('checks/check-contract.mjs', '--validate'), `validate contract ${S}`, { gate: true })
+  if (infraReason(valid)) return stop(infraReason(valid), valid.output)
+  if (valid.exitCode !== 0) {
+    await sh(node('bin/state.mjs', 'set subStep spec'), 'state → spec (contract invalid)')
+    await role('analyst', `${CTX}\n\nThe contract does not parse or validate — the generators reject api/openapi.yaml:\n${valid.output.slice(-2500)}\nRepair api/openapi.yaml (quote values that contain ": " or start with special characters; keep the meaning). Contract and docs only. Done when ${node('checks/check-contract.mjs', '--validate')} exits 0.`, `analyst: repair contract ${S}`)
+    valid = await sh(node('checks/check-contract.mjs', '--validate'), `validate contract ${S} (after repair)`, { gate: true })
+    if (valid.exitCode !== 0) return stop(`contract invalid after one analyst repair${infraReason(valid) ? ` (${infraReason(valid)})` : ''}`, valid.output)
+  }
+  let compile = await sh(node('bin/compile-check.mjs', '--stage main --if-contract-changed'), `compile main ${S}`, { gate: true })
+  if (compile.exitCode === 0) return null
   if (infraReason(compile)) return stop(infraReason(compile), compile.output)
   await sh(node('bin/state.mjs', 'set subStep sync'), 'state → sync')
   let guard = { exitCode: 0, output: '' }
