@@ -17,7 +17,7 @@ import { flakyCases, junitCases, junitFailures, javaTestFile, recordFlaky, vites
 import { FALLOUT_MEANS, LEAK_MEANS, changedFiles, isolationVerdicts, layerCommand, relatedTests } from './lib/related.mjs';
 import { filesByGroup, gateHash, gateState, recordGates } from './lib/inputs.mjs';
 import { coverageOf } from './lib/coverage.mjs';
-import { slowReport } from './lib/timing.mjs';
+import { slowReport, suiteHealth } from './lib/timing.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -116,6 +116,13 @@ if (!args.quick) {
   }
   const slow = slowReport(xmlDir);
   if (slow) console.log(`\n${slow}`);
+  // Suite health (F6): warnings only — they never change the result.
+  if (!related && ctx.app && layers.backend) {
+    const hp = path.join(path.dirname(lastRunPath(ctx.app)), 'suite-health.json');
+    const h = suiteHealth(ctx.appDir, readJson(hp));
+    for (const w of h.warnings) console.log(`WARN     suite: ${w}`);
+    try { writeJson(hp, h.snapshot); } catch { /* informational */ }
+  }
   // Tests that failed and passed on the retry (Gradle test-retry plugin): reported and recorded, never blocking (D8).
   const flaky = flakyCases(junitCases(xmlDir, T0)).map((c) => `${c.classname}.${c.name}`);
   for (const f of flaky) console.log(`FLAKY    ${f} (failed, then passed on retry — recorded, not blocking)`);

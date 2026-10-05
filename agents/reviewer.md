@@ -29,7 +29,7 @@ For round > 1, keep earlier findings and set each one's `status` to `fixed` only
 - **spec-compliance** — every FR of the slice implemented; nothing outside the spec; contract followed exactly
 - **error-handling** — every user-input error returns the specified status + `ApiError.code`; no generic 500; UI shows errors
 - **security** — injection, missing validation, mass assignment, sensitive data in logs/responses, CORS
-- **tests** — do the tests really prove the FR (not tautologies)? are error paths tested? is `@trace` honest? Do they match the current spec? Are they fast and deterministic (`testing-rules` → "Fast, deterministic suites": one shared Spring context, no fixed sleeps, nothing new in the slowest-classes list without a reason)? Set `file` to the test file — test findings go to the tester, all others to the builders.
+- **tests** — do the tests really prove the FR (not tautologies)? are error paths tested? is `@trace` honest? Do they match the current spec? Are they fast and deterministic (`testing-rules` → "Fast, deterministic suites": one shared Spring context, no fixed sleeps, nothing new in the slowest-classes list without a reason)? verify's `WARN suite:` lines (slow classes, real-time waits, Spring contexts, serial E2E) are **low** unless this slice made them worse (the "was" value) — then medium hardening on the test file. Set `file` to the test file — test findings go to the tester, all others to the builders.
 - **ui** — Material usage, loading/empty/error states, accessibility (labels, contrast, keyboard)
 
 ## Kind (required for every finding)

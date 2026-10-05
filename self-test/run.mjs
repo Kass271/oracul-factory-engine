@@ -14,7 +14,7 @@ import { gradleFilterValid, isolationVerdicts, layerCommand, relatedTests } from
 import { diagnostics, summaryLine } from '../checks/lib/compile.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
-import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
+import { slowestClasses, springContexts, suiteHealth, summariseTimings } from '../checks/lib/timing.mjs';
 import { dockerignoreMatcher, imageInputsHash } from '../checks/lib/hash.mjs';
 import { composeArgs } from '../checks/lib/stack.mjs';
 import { filesByGroup, gateHash, groupOf } from '../checks/lib/inputs.mjs';
@@ -656,6 +656,28 @@ test('slow report green: slowest classes and Spring context starts from the JUni
   const ok = top[0].name === 'a.SlowIT' && top[0].seconds === 42.5 && top[0].tests === 3 && springContexts(dir) >= 2;
   return { code: ok ? 0 : 1, out: JSON.stringify(top) };
 });
+// F6: suite health warnings (never blocking)
+const suiteXml = (sb, cls, secs, ctxStarts = 1) => sb.put(`backend/build/test-results/test/TEST-${cls}.xml`, `<testsuite name="${cls}" tests="1" time="${secs}"><system-out>${'Started X in 1.0 seconds\n'.repeat(ctxStarts)}</system-out></testsuite>`);
+test('health green: a 40-s class with Thread.sleep → slow + real-time wait warning', 0, (sb) => {
+  sb.rm('backend/build/test-results'); suiteXml(sb, 'com.oracul.app.news.NewsSearchTimingIT', 48);
+  sb.put('backend/src/test/java/com/oracul/app/news/NewsSearchTimingIT.java', 'class T { void t() throws Exception { Thread.sleep(5000); } }');
+  const h = suiteHealth(sb.appDir, null);
+  return { code: h.warnings.some((w) => /NewsSearchTimingIT took 48s .*real-time wait/.test(w)) ? 0 : 1, out: h.warnings.join(' | ') };
+});
+test('health green: 25 Spring context starts and a serial 60-test E2E suite → warnings with "was"', 0, (sb) => {
+  sb.rm('backend/build/test-results'); suiteXml(sb, 'a.AIT', 2, 25);
+  sb.put('e2e/playwright.config.ts', 'export default defineConfig({\n  workers: 1,\n  fullyParallel: false,\n});\n'); sb.edit('e2e/report/results.json', '"expected": 1', '"expected": 60');
+  const h = suiteHealth(sb.appDir, { contexts: 18, e2eTests: 50, classes: {} });
+  return { code: h.warnings.some((w) => /25 Spring context starts \(was 18\)/.test(w)) && h.warnings.some((w) => /workers: 1 with 60 tests \(was 50\)/.test(w)) ? 0 : 1, out: h.warnings.join(' | ') };
+});
+test('health green: a fast suite → no warning', 0, (sb) => { sb.rm('backend/build/test-results'); suiteXml(sb, 'a.AIT', 2, 3); return { code: suiteHealth(sb.appDir, null).warnings.length ? 1 : 0, out: '' }; });
+test('health green: a new class over 20 s is flagged as new', 0, (sb) => { sb.rm('backend/build/test-results'); suiteXml(sb, 'a.NewIT', 25); const h = suiteHealth(sb.appDir, { classes: { 'a.OldIT': 3 } }); return { code: h.warnings.some((w) => /a\.NewIT took 25s — new since the last slice/.test(w)) ? 0 : 1, out: h.warnings.join(' | ') }; });
+test('health green: a dependency project with real tests is flagged', 0, (sb) => {
+  sb.put('e2e/playwright.config.ts', "projects: [{ name: 'setup' }, { name: 'chromium', dependencies: ['setup'] }]");
+  const rep = { stats: { expected: 7 }, suites: [{ file: 's.spec.ts', specs: Array.from({ length: 7 }, (_, i) => ({ title: `t${i}`, file: 's.spec.ts', tests: [{ projectName: 'setup', status: 'expected' }] })) }] };
+  sb.put('e2e/report/results.json', JSON.stringify(rep));
+  return { code: suiteHealth(sb.appDir, null).warnings.some((w) => /dependency project "setup" contains 7 tests/.test(w)) ? 0 : 1, out: '' };
+});
 test('slow report green: no test results → empty, no error', 0, (sb) => { sb.rm('backend/build/test-results'); return { code: slowestClasses(sb.p('backend/build/test-results/test')).length ? 1 : 0, out: '' }; });
 
 // ---------------- migrate.mjs (B2): existing apps get what new apps are scaffolded with — only known text is patched
@@ -1205,6 +1227,11 @@ test('traceability red: a spec red in the ledger makes its FR ✘', 1, (sb) => {
 test('ledger red: a failed run with a stale report records failures, never a stale pass', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); fakePw(sb, 50, 1); node(sb, 'bin/stack.mjs', ['e2e', '--no-up']); return { code: 0, out: '' }; },
   (sb) => (JSON.parse(fs.readFileSync(LEDGER(sb), 'utf8')).gates['e2e:rooms.spec.ts'].result === 'fail') || 'stale pass recorded');
 
+test('health red: a suite warning never turns verify RED by itself', 0, (sb) => {
+  sb.state({ step: '04_build' }); greenNow(sb); sb.baseline({ backend: 80, frontend: 75 });
+  sb.rm('backend/build/test-results'); suiteXml(sb, 'a.SlowIT', 99, 30);
+  return node(sb, 'checks/verify.mjs', ['--incremental']);
+});
 // lock library (async)
 const asyncTests = [];
 const atest = (name, expectCode, fn) => { if (!filter || name.includes(filter)) asyncTests.push({ name, expectCode, fn }); };
