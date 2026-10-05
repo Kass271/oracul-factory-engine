@@ -1110,6 +1110,28 @@ test('gates green: every gate recorded on the current inputs → ALL GREEN', 0, 
 test('gates red: a gate green on older inputs is stale', 1, (sb) => { recordGatesFor(sb, ['backend', 'frontend', 'e2e:rooms.spec.ts']); sb.put('frontend/src/app/x.ts', 'x'); return node(sb, 'bin/gates.mjs', ['status']); },
   (sb, r) => /stale\s+frontend .*inputs changed/.test(r.out) || r.out);
 
+// ---------------- G3: incremental verify — a layer green on the current inputs is not run again
+const greenNow = (sb, layers = ['backend', 'frontend']) => {
+  const l = { gates: Object.fromEntries(layers.map((g) => [g, { hash: gateHash(sb.appDir, g), result: 'pass', full: true, coverage: g === 'backend' ? 80 : 75, at: '2026-10-05T00:00:00Z' }])) };
+  write(LEDGER(sb), JSON.stringify(l));
+  sb.put('../../state/apps/fixture/last-run.json', JSON.stringify({ layers: { backend: { exit: 0, seconds: 500 }, frontend: { exit: 0, seconds: 10 } } }));
+};
+test('incremental green: nothing changed → both layers skipped, checks run, GREEN', 0, (sb) => { sb.state({ step: '04_build' }); greenNow(sb); sb.baseline({ backend: 80, frontend: 75 }); return node(sb, 'checks/verify.mjs', ['--incremental']); },
+  (sb, r) => (/SKIP\s+backend: green on the current inputs/.test(r.out) && /SKIP\s+frontend: green on the current inputs/.test(r.out) && /== coverage ratchet ==/.test(r.out) && /full run of 2026-10-05T00:00:00Z, inputs unchanged/.test(r.out)
+    && JSON.parse(fs.readFileSync(lastRunFile(sb), 'utf8')).layers.backend.reused === true) || r.out);
+test('incremental green: a README change still skips both layers', 0, (sb) => { sb.state({ step: '04_build' }); greenNow(sb); sb.baseline({ backend: 80, frontend: 75 }); sb.put('README.md', '# changed'); return node(sb, 'checks/verify.mjs', ['--incremental']); });
+test('incremental red: a frontend change runs the frontend (only)', 1, (sb) => { sb.state({ step: '04_build' }); greenNow(sb); sb.put('frontend/src/app/x.ts', 'x'); return node(sb, 'checks/verify.mjs', ['--incremental']); },
+  (sb, r) => (/SKIP\s+backend: green/.test(r.out) && /== frontend: npm run test:ci/.test(r.out)) || r.out);
+test('incremental red: a shared change runs both layers', 1, (sb) => { sb.state({ step: '04_build' }); greenNow(sb); sb.put('docker-compose.yml', 'services: {}'); return node(sb, 'checks/verify.mjs', ['--incremental']); },
+  (sb, r) => (/== backend: \.\/gradlew/.test(r.out) && /== frontend: npm/.test(r.out)) || r.out);
+test('coverage green: a layer green on the current inputs uses its full-run coverage, not a partial report', 0, (sb) => { greenNow(sb); sb.baseline({ backend: 79, frontend: 74 }); return node(sb, 'checks/check-coverage.mjs'); },
+  (sb, r) => /backend 80\.0% \(full run of/.test(r.out) || r.out);
+test('coverage red: a stale gate falls back to the report on disk', 1, (sb) => { greenNow(sb); sb.baseline({ backend: 90, frontend: 74 }); sb.put('backend/src/main/java/X.java', 'class X {}'); return node(sb, 'checks/check-coverage.mjs'); });
+test('verify green: --reuse-if-fresh reuses when both layer gates are green on the current inputs', 0, (sb) => { greenNow(sb); touchLater(sb, 'backend/build/test-results/test/TEST-com.oracul.app.rooms.RoomsApiIT.xml'); return reuse(sb); },
+  (sb, r) => /reusing the full GREEN verify/.test(r.out) || r.out);
+test('verify red: --reuse-if-fresh runs a full verify when a layer gate is stale', 1, (sb) => { greenNow(sb); sb.put('frontend/src/app/x.ts', 'x'); return reuse(sb); },
+  (sb, r) => /a layer gate is not green on the current inputs \(frontend\)/.test(r.out) || r.out);
+
 // lock library (async)
 const asyncTests = [];
 const atest = (name, expectCode, fn) => { if (!filter || name.includes(filter)) asyncTests.push({ name, expectCode, fn }); };
