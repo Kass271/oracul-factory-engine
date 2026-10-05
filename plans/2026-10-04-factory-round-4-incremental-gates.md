@@ -3,6 +3,10 @@
 Status: **WAITING — implement only when the user says so.** Written 2026-10-04 from the app session's request
 (`oracul/docs/for-factory-improvements/prompt-incremental-gates.md`, issues 11–13 of `issues-phase-02-session-3.md`).
 Related: `plans/2026-10-04-factory-round-3.md` (F1–F7) — see "Relation to round 3" at the end.
+Revised 2026-10-05 after `retro-slice-03.md`, `slice-retro-diagnostics.md` and the session-2 list: G4 reads E2E results
+from the ledger instead of rewriting Playwright's report and handles project `dependencies`; G6 adds a hardening
+backlog; G9 becomes the user's **takeover after round 3** with a deterministic close command (G11); slice retro and
+interventions log added (D1, D2).
 
 ## Goal
 A fix round re-runs only the gates whose inputs changed. A gate that went green on inputs X stays green while X is
@@ -21,8 +25,14 @@ re-running everything every round.
 - Cause 4: every open medium finding blocks the close, whether it is a product defect or a test-hardening wish
   (issue 12: 6 medium in round 2, 2 of them hardening) → one full round per review.
 - Cause 5: the FR-43 README check lives in Playwright (`e2e/tests/readme.spec.ts`), although it needs no browser.
-- Measured suite costs: full backend ~9.5 min (148 classes, 111 Spring contexts), full E2E ~20 min (169 tests,
-  `workers: 1`), frontend ~10 s.
+- Measured suite costs: full backend ~8–9.5 min (~6 min of it real-time waits in a few ITs; 111 Spring contexts),
+  full E2E ~20 min (169 tests, `workers: 1`), frontend ~10 s.
+- Slice 03 as a whole (retro-slice-03.md): 5 h 54 min, ~124 agent runs, ~4.4 M subagent tokens. E2E 111 min (4 full
+  runs ~20 min each + 3 focus runs ~7.6 min). Time classes: real work ~54 % · factory false stops/bugs ~21 % (YAML at
+  the spec gate, check-sync required→optional, the fixed `verify --related` bug) · gate design ~20 % (the README round,
+  focus+full double runs, full verify every round) · app test cost ~4 %.
+- Round 4 should have been a takeover (one-line fix, syntax check, close). "Take control after round 3" is now the
+  user's rule.
 
 ## Design rules
 1. **Fail-safe inputs.** Every file belongs to an explicit, documented group (backend, frontend, e2e, docs). Any other
@@ -71,16 +81,23 @@ re-running everything every round.
 ### G4 — E2E: run only specs that aren't green on the current inputs (complement, not a repeat)
 - `stack.mjs e2e --detach --needed`: the spec list = every spec whose `e2e:<spec>` gate is not green on the current
   hash. An empty list → `E2E NOTHING NEEDED` (exit 0, nothing started). Runs as an **official** run: per-spec results
-  go into the ledger; the Playwright JSON of the official report is merged (new results replace the same specs', the
-  others keep their earlier green entries — each tagged with the hash it ran on).
-- `check-e2e-fresh` reads the ledger: fresh = every spec gate green on its current hash, and the spec set equals the
-  specs on disk (a new or deleted spec counts).
+  (status, duration, the hash it ran on, its QA screenshots) go into the ledger `gates.json`.
+- Playwright's own `report/results.json` is **not rewritten** (no hand-made Playwright format). The readers move to the
+  ledger: `check-e2e-fresh`, check-artifacts `playwrightGreen` and `gen-traceability` use the per-spec ledger entries when
+  the ledger exists, and the report otherwise (older apps, first run). A spec counts only on its current hash.
+- `check-e2e-fresh`: fresh = every spec gate green on its current hash, and the spec set equals the specs on disk (a new
+  or deleted spec counts).
+- **Project `dependencies`** (session-2 item 10): Playwright always runs a selected project's dependency projects, so a
+  scoped run drags them along. `--needed` keeps them (they are setup — auth, seed data); F6 warns when a dependency
+  project contains real tests, and `testing-rules` says dependency projects are setup only. Never `--no-deps` blindly
+  (it would skip required setup).
 - Fix rounds: no separate focus run any more — the needed set *is* the focus. With an unchanged image (tests/docs-only
   rounds) only changed or failed specs run; with a changed image every spec is needed once, at the slice gate (G5).
 - Self-test: only `e2e/tests/a.spec.ts` changed → needed = [a] (green); image changed → all specs needed (green);
-  nothing changed → NOTHING NEEDED, no lock taken (green); a new spec file → needed (red for "fresh"); merged report
-  keeps green entries of untouched specs and replaces re-run ones (green); a spec green on an old hash is not fresh
-  (red).
+  nothing changed → NOTHING NEEDED, no lock taken (green); a new spec file → needed (red for "fresh"); ledger keeps the
+  green entries of untouched specs and replaces re-run ones (green); a spec green on an old hash is not fresh (red);
+  gen-traceability and playwrightGreen read the ledger, and fall back to the report without one (green/green);
+  screenshots of reused specs stay valid evidence (green).
 
 ### G5 — the green loop: targeted rounds, one slice gate at the end
 - A fix round runs, in order, only what its changes need:
@@ -109,6 +126,8 @@ re-running everything every round.
   a round happens anyway, and handed to the release review as input.
 - Reviewer rule: `hardening` only for a request to strengthen a test of behaviour that an existing passing test already
   covers; anything a user could hit is a defect.
+- Open hardening findings collect in `state/apps/<app>/hardening.json`; the release review gets them as input, and the
+  final report lists what is still open as "Hardening backlog" (never silently dropped).
 - Self-test: open medium hardening → close allowed, listed (green); open medium defect → blocked (red); open high
   hardening → blocked (red); missing kind → treated as defect (red); snapshot doesn't change the index or HEAD (green).
 
@@ -129,11 +148,53 @@ re-running everything every round.
 - Self-test: README change → related = the test that reads it, nothing else (green); a doc no test names → no test
   (green); the backend gate hash includes README only when a backend test names it (green/red pair).
 
-### G9 — escalate after round 3 instead of rounds 4–5, and keep the code
-- `maxRounds` default 3. Not clean after round 3 → `STOPPED "rounds: 3 without a clean gate — <leftover>"`: code kept,
-  not parked, leftover findings and failing gates in `rounds.md`. The orchestrator stops and asks the user (continue with
-  more rounds, or accept a leftover as a follow-up). `maxRounds` in the args still overrides.
-- Self-test: 3 red rounds → STOPPED with the leftover, nothing parked (red for BLOCKED); a clean round 2 → DONE (green).
+### G9 — takeover after round 3 (the user's rule), code kept
+- `maxRounds` default 3. Not clean after round 3 → `STOPPED "takeover: <leftover>"`: code kept, not parked; the
+  leftover (failing gates, open blocking findings, the files involved) in `rounds.md` and in the result.
+- **Takeover procedure** (`skills/factory/SKILL.md`, an explicit exception to rule 4 "the orchestrator writes no app
+  code"): the orchestrator may fix the listed leftover itself — small, targeted fixes only. It sets the matching subStep
+  first (`green` for code, `test-fix` for tests — the guard's role limits stay), logs why with `state.mjs note` (D2),
+  runs the cheap checks (pre-checks G7, related tests), then an **independent** delta review (`oracul:reviewer` agent,
+  never itself) and finally `bin/close-slice.mjs` (G11). If the leftover is not small (several files, a design question),
+  it asks the user instead.
+- Self-test: 3 red rounds → STOPPED "takeover" with the leftover, nothing parked (red for BLOCKED); a clean round 2 →
+  DONE (green); `maxRounds` override still works (green).
+
+### G11 — `bin/close-slice.mjs`: one deterministic close for the workflow and the takeover
+- The close chain moves out of the workflow into a command: slice gate (G3 incremental verify + G4 needed E2E, or
+  `--check-only` when they already ran), `check-review --slice`, `check-e2e-fresh`, artifacts `--stage done`,
+  coverage ratchet `--update`, commit, slice DONE, subStep none, retro (D1) — in that order, stopping at the first
+  failure with the reason. The workflow's close calls it; so does the takeover. No other way to mark a slice DONE.
+- Self-test: the existing close-order case now asserts the command's internal order (green); a stale gate → refused,
+  nothing committed (red); an open blocking finding → refused (red); after a takeover fix: green gates + clean review →
+  DONE and committed (green).
+
+### D1 — slice retro, generated (no agent)
+- `bin/retro.mjs --slice <s>` writes `docs/<phase>/04_build/<slice>/retro.md` at DONE, STOPPED and BLOCKED (called by
+  close-slice and by the workflow's STOPPED/BLOCKED returns) from data that exists: `timings.jsonl` (time per subStep),
+  a new `gate-runs.jsonl` (every gate run: gate, exit, duration, input hash, attempt — appended by verify, red-check,
+  stack e2e, compile-check), `rounds.md`, `suite-health.json`, `gates.json`, interventions (D2).
+- Contents: timeline with %, gate runs with **same-hash reruns flagged as waste**, rounds (what failed, routed to whom,
+  did the same failure return), slowest tests and their diff, scope size (FRs, superseded tests, contract diff lines),
+  delay classes (D2). Ends with the five-line summary the orchestrator shows the user:
+  `03_x DONE in 2h41m · 2 rounds · Time: build 48% · verify 22% · E2E 18% · stops 12% · Waste: 31m (…) · Slowest: …`.
+- Agent counts/tokens are not visible to engine scripts; the orchestrator may append them from the workflow result
+  (`--agents "<n> runs, <tokens>"`).
+- The retro is additive (a new doc, not in the manifest's required set).
+- Self-test: from fixture timings + gate runs → timeline sums to the wall time, a same-hash double run is flagged
+  (green); missing data → the section says "no data", never fails the close (green); retro never changes exit codes of
+  close (red case for the opposite).
+
+### D2 — interventions log and delay classes
+- `state.mjs note "<why>" [--tag scope|app-tests|factory-false-positive|agent-error|infra|external-service]` appends to
+  `state/apps/<app>/notes.jsonl` (timestamp, slice, subStep). Required in the takeover (G9) and for any manual
+  `state.mjs set subStep` outside a workflow (SKILL rule).
+- Every STOPPED result is tagged automatically where the cause is known: stack busy / guard / timeout / worker lost →
+  `infra`; factory command error → `factory-false-positive`; sync/park failures → `factory-false-positive` unless the
+  output names the app. Tagged factory entries also go to `state/apps/<app>/factory-issues.jsonl` (gate, output excerpt,
+  repro command) — the factory-issue backlog that replaces hand-written lists.
+- Self-test: note appended with tag (green); unknown tag refused (red); a STOPPED "factory command error" lands in
+  factory-issues.jsonl (green); notes and issues appear in the retro (green).
 
 ### G10 — honest labels
 - The `e2e-wait` runner calls are labelled `waiting for E2E (n/8)`, so "still running" no longer looks like a failure in
@@ -146,6 +207,8 @@ re-running everything every round.
 | One frontend file | ~45 min | **~10–15 min** for the round (frontend tests + needed specs + delta review) |
 | Slice gate (once) | every round | stale layers in full + needed E2E specs only |
 | Close | — | refused while any gate is stale (ledger) |
+| After round 3 | rounds 4–5, ~30–45 min each | takeover: targeted fix + delta review + close-slice |
+| Slice end | hand-written retro | generated retro + five-line summary; factory issues in a backlog file |
 
 The target for a one-frontend-file round counts the round itself. When the image changed, every E2E spec is needed
 once at the slice gate; that costs a full E2E run (~20 min today, ~5–6 min after the app's parallel-workers work).
@@ -162,25 +225,35 @@ once at the slice gate; that costs a full E2E run (~20 min today, ~5–6 min aft
 | R7 | Escalating after round 3 stops slices that round 4 would have fixed | Med / Low | Code kept, "continue" gives more rounds; `maxRounds` overridable | One user decision |
 | R8 | Ledger out of sync (a file edited outside the workflow) | Med / Low | Hashes are recomputed at every gate from disk; the ledger only says "green on hash X" | None |
 | R9 | Larger workflow change (green loop restructured) breaks existing guarantees | Med / High | All current workflow self-test cases stay; replay through the guard; smoke covers a README-only round and a one-file round for real | None found |
+| R10 | Takeover weakens role separation (the orchestrator writes code) | Med / Med | Only after round 3 and only for a listed small leftover; guard subStep limits stay; logged (D2); an independent reviewer agent; close only via close-slice with every gate | The orchestrator's judgement on "small" |
+| R11 | Moving the close chain into a command changes close behaviour | Low / High | Same order and checks as today, asserted by self-test; the workflow calls the command | None |
+| R12 | The ledger becomes the source for E2E evidence; a bug there misreports QA | Low / High | Report fallback without a ledger; per-spec hash check; smoke compares ledger vs a full run once | None |
 
 ## Relation to round 3 (F1–F7)
 - **F1 (skip a broad focus run)** is superseded by G4/G5 (no separate focus run; the needed set is the focus).
 - **F5 (release reuses the verify)** is superseded by G3 (the ledger makes reuse exact).
-- **F2, F3, F4, F6, F7** stay as they are; they don't conflict.
-- Suggested order for one factory session: round 3's F2, F3, F4, F6, F7 → round 4's G2, G1, G8, G7, G3, G4, G6, G5,
-  G9, G10. G2 alone already removes the README → rebuild → full E2E chain and can go first as a quick win.
+- **F2, F3, F4, F6, F7, F10** stay (F6/F7 revised, F10 added); they don't conflict.
+- Order for one factory session: **G2** (quick win: no rebuild/E2E for docs) → F2, F3, F4 (the false stops: ~21 % of
+  slice 03) → F10 → D2 (notes/tags, needed by G9) → G1, G8, G7, G3, G4 → G6 → G11 → G5 → G9 → G10 → F6, F7 → D1.
+
+## App-side follow-ups (not factory work — the app session's maintenance prompt)
+- Replace real-time waits in the news-search ITs with an injected `Clock`/fake time (backend ~8 → ~2 min per full run).
+- Move the README checks out of `e2e/tests/readme.spec.ts` into a plain test, keep the real-shell run, drop the walker.
+- Parallel E2E workers with isolated test data (E2E ~20 → ~5–6 min); Gradle test-retry block (the migration was
+  refused because `build.gradle.kts` is customised).
 
 ## Run prompt (factory session, between slices)
 ```
-Implement plans/2026-10-04-factory-round-3.md items F2, F3, F4, F6, F7 and
-plans/2026-10-04-factory-round-4-incremental-gates.md items G1–G10 (F1 and F5 are superseded by G3/G4/G5) with automerge.
+Implement plans/2026-10-04-factory-round-3.md items F2, F3, F4, F6, F7, F10 and
+plans/2026-10-04-factory-round-4-incremental-gates.md items G1–G11, D1, D2 (F1 and F5 are superseded) with automerge.
 App paused: yes
 1. Read AGENTS.md and both plans. Worktree: git worktree add ../factory-engine-r4 -b round-4 main. Work only there;
    never touch ../apps/ or state/.
-2. Order: G2, F2, F3, F4, F6, F7, G1, G8, G7, G3, G4, G6, G5, G9, G10 — one commit each ("R<n>: <what>"), each with its
+2. Order: G2, F2, F3, F4, F10, D2, G1, G8, G7, G3, G4, G6, G11, G5, G9, G10, F6, F7, D1 — one commit each ("R<n>: <what>"), each with its
    red + green self-test cases; node self-test/run.mjs must print N/N before each commit. Never weaken a check.
-3. Smoke: add steps for a README-only round (no rebuild, no E2E, gate finds everything green) and a one-file frontend
-   round (only needed specs), plus contract validation on the real generators. Run node bin/env-check.mjs, then
+3. Smoke: add steps for a README-only round (no rebuild, no E2E, gate finds everything green), a one-file frontend
+   round (only needed specs, ledger vs report agree), contract validation on the real generators, and a close via
+   bin/close-slice.mjs that writes retro.md. Run node bin/env-check.mjs, then
    node self-test/smoke.mjs. Bump the plugin version.
 4. Automerge only if: self-test N/N, smoke green, "App paused: yes", app at subStep none, no state/apps/*/stack.lock.
    If main moved, rebase and re-test. git merge --ff-only round-4 in the main checkout, self-test there; on failure

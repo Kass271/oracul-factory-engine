@@ -1,6 +1,8 @@
 # Oracul factory — round 3 (F1–F7)
 
-Status: **WAITING — implement only when the user says so.** Written 2026-10-04 after slice 03 of oracul-engine
+Status: **WAITING — implement only when the user says so.** Revised 2026-10-05 after the notes in
+`oracul/docs/for-factory-improvements/` (retro-slice-03, session-2/3 issues, retro diagnostics): F1 and F5 are replaced
+by round 4 (G3/G4); F6 and F7 corrected; F10 added. Implemented together with round 4 (see its run prompt). Written 2026-10-04 after slice 03 of oracul-engine
 (253 min; ~48 of 91 green-stage minutes in E2E; issues list: oracul/docs/for-factory-improvements/issues-phase-02-session-3.md).
 Out of scope here: F8 (E2E check in red — later, WARN-first trial), F9 (parallel docs agents — needs per-agent guard
 rules), parallel slices (see the analysis at the end).
@@ -68,24 +70,47 @@ fresh (green/red pair); workflow: release calls verify with the flag (green).
 **Risk:** reusing stale results — same staleness rules as the slice close, which smoke already proves.
 
 ## F6 — suite health warnings (never blocking)
-**Why:** 111 Spring context starts, 63-s near-duplicate classes and a serial 169-test E2E suite grew unnoticed.
-**Change:** verify prints `WARN suite:` lines when Spring context starts > 20, a test class > 60 s, or
-`e2e/playwright.config.ts` has `workers: 1` with > 50 E2E tests (from the last official report). Values are stored in
-`state/apps/<app>/suite-health.json` and printed as `now (was …)`. Exit code unchanged. The reviewer prompt: suite
-health warnings are low severity unless the slice made them worse.
-**Self-test:** 25 contexts → WARN, exit unchanged (green); 5 contexts → no WARN (green); workers 1 + 60 tests →
+**Why:** the backend suite reached ~8 min, ~6 of them in real-time waits (five `NewsSearchGrouping*IT` at ~63 s,
+`NewsSearchTimingIT` 48 s, `SearchPlannerTest` 40 s — retro-slice-03), plus 111 Spring context starts; the E2E suite
+runs 169 tests serially (`workers: 1`). Visible already at slice 02, noticed by nobody.
+**Change:** verify prints `WARN suite:` lines (exit code unchanged) for:
+- a test class > 30 s, or a class that is new since the last slice and > 20 s (test-cost diff, `suite-health.json`);
+- **real-time waits** in those slow classes: `Thread.sleep`, `TimeUnit.*.sleep`, `Awaitility … atMost(` ≥ 5 s,
+  `Instant.now()`/`System.currentTimeMillis()` in assertions → "inject a Clock / fake time";
+- Spring context starts > 20;
+- `workers: 1` with > 50 E2E tests; a Playwright project used as a `dependencies` entry that contains more than setup
+  (session-2 item 10: such a project runs with every scoped run).
+Values in `state/apps/<app>/suite-health.json`, printed as `now (was …)`. The reviewer: low severity unless the slice
+made it worse; the retro (round 4 D1) lists them.
+**Self-test:** 25 contexts → WARN, exit unchanged (green); 5 contexts → no WARN (green); a 40-s class with
+`Thread.sleep` → "real-time wait" WARN (green); workers 1 + 60 tests → WARN (green); a dependency project with tests →
 WARN (green); "was" value printed after a second run (green); a WARN never turns verify RED (red case for the
 opposite).
 **Risk:** reviewer noise — low severity by rule.
 
-## F7 — slice-size guard in Step 3
-**Why:** slice 03 had 6 FRs and many rewritten older tests (253 min).
-**Change:** check-artifacts gets warn support (a rule may return `{ warn }`); new rule `planSliceSize` on
-`03_plan/plan.md`: WARN for a slice with more than 3 FRs, only while `step` is `03_plan` (approved plans are never
-re-checked). The analyst's Step 3: prefer ≤ 3 FRs per slice, split larger ones; the orchestrator shows the WARN lines
-with the plan and the user decides.
-**Self-test:** 4-FR slice at step 03_plan → WARN, exit 0 (green); at step 04_build → no WARN (green); 2-FR slices →
-no WARN (green); an INVALID elsewhere still fails (red).
+## F7 — slice-size guard, at two points
+**Why:** slice 03 had 6 FRs and many rewritten older tests (5 h 54 min wall time).
+**Change:** check-artifacts gets warn support (a rule may return `{ warn }`).
+- Step 3 (`planSliceSize` on `03_plan/plan.md`, only while `step` is `03_plan`): WARN for a slice with **more than 4
+  FRs** (threshold from the retro proposal). The analyst prefers ≤ 4 FRs per slice; the orchestrator shows the WARN
+  with the plan, the user decides.
+- Step 4a (`sliceSpec`, stage spec): WARN when the slice's "Changes earlier behaviour" lists **more than 10** older
+  tests — the rewrite size is only known after the spec delta. The orchestrator tells the user before the tester
+  starts (split or continue); no automatic plan change.
+**Self-test:** 5-FR slice at step 03_plan → WARN, exit 0 (green); at step 04_build → no WARN (green); 3-FR slices →
+no WARN (green); 11 superseded tests at stage spec → WARN, exit 0 (green); an INVALID elsewhere still fails (red).
+
+## F10 — who owns the stack wiring (session-2 item 6)
+**Why:** in slice 01 nobody owned the E2E stub and its wiring (compose override, nginx route) in green, so the slice
+blocked. Round 2's stack modes declare *which* files form a mode, not who writes them.
+**Change (docs + one guard case):** the analyst declares the modes (`.oracul/stack.json`) and names in the spec delta
+which service/route the slice needs; **backend-builder** owns compose files and stub services (`docker-compose*.yml`,
+stub code/config); **frontend-builder** owns `frontend/nginx.conf` routes. Triage sends stack-wiring failures to that
+owner (layer hint `backend` for compose/stub, `frontend` for nginx). Agent files, triage prompt and `stack-rules`
+state it.
+**Self-test:** triage prompt names the owners (green); a review finding on `docker-compose.e2e.yml` routes to the
+backend builder, on `frontend/nginx.conf` to the frontend builder (green); the guard still blocks stack.json edits in
+green (red).
 **Risk:** more, smaller slices → a little more per-slice overhead; WARN only, the user decides.
 
 ## Order, verification, merge
@@ -102,7 +127,8 @@ version. Merge (fast-forward) only between slices; restart the app session after
 | F4 | no | weaker sync check | four-condition match, red cases |
 | F5 | no | stale reuse | the existing staleness rules |
 | F6 | no | reviewer noise | WARN only, low severity |
-| F7 | slightly (plan may be split) | more slices | WARN only, new plans only |
+| F7 | slightly (plan may be split) | more slices | WARN only, the user decides |
+| F10 | no | wrong owner chosen | explicit file → owner table, routing self-test |
 
 ## Analysis: run independent slices in parallel?
 **Idea:** at Step 4, slices whose dependencies are all DONE (e.g. two slices that both depend only on 01) are built at
