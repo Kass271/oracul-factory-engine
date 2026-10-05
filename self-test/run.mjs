@@ -17,6 +17,12 @@ import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } 
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
 import { dockerignoreMatcher, imageInputsHash } from '../checks/lib/hash.mjs';
 import { composeArgs } from '../checks/lib/stack.mjs';
+import { filesByGroup, gateHash, groupOf } from '../checks/lib/inputs.mjs';
+// write ledger entries for the sandbox app as if the gates ran on the current inputs
+function recordGatesFor(sb, gates) {
+  const l = { gates: Object.fromEntries(gates.map((g) => [g, { hash: gateHash(sb.appDir, g), result: 'pass', full: true, at: new Date().toISOString() }])) };
+  write(path.join(sb.stateDir, 'apps/fixture/gates.json'), JSON.stringify(l));
+}
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
 const SPEC = 'docs/phase-01_mvp/02_specs/rooms.md';
@@ -1041,6 +1047,49 @@ test('check-stack green: declared modes', 0, (sb) => { withModes(sb); return nod
 test('check-stack green: plain docker-compose.yml', 0, (sb) => node(sb, 'checks/check-stack.mjs'));
 test('check-stack red: extra compose file without modes', 1, (sb) => { sb.put('docker-compose.e2e.yml', 'x'); return node(sb, 'checks/check-stack.mjs'); });
 test('check-stack red: config without an e2e mode', 1, (sb) => { withModes(sb, { modes: { run: { files: ['docker-compose.yml'] } } }); return node(sb, 'checks/check-stack.mjs'); });
+
+// ---------------- G1: input groups and the gate ledger
+const LEDGER = (sb) => path.join(sb.stateDir, 'apps/fixture/gates.json');
+const hashes = (sb) => { const g = filesByGroup(sb.appDir); return { backend: gateHash(sb.appDir, 'backend', g), frontend: gateHash(sb.appDir, 'frontend', g), docs: gateHash(sb.appDir, 'docs', g), rooms: gateHash(sb.appDir, 'e2e:rooms.spec.ts', g) }; };
+const changedGates = (before, after) => Object.keys(before).filter((k) => before[k] !== after[k]).sort().join(',');
+test('inputs green: file groups (unknown and root files are shared)', 0, () => {
+  const ok = groupOf('backend/src/main/A.java') === 'backend' && groupOf('frontend/src/app/x.ts') === 'frontend' && groupOf('e2e/tests/a.spec.ts') === 'e2e'
+    && groupOf('README.md') === 'docs' && groupOf('backend/README.md') === 'docs' && groupOf('docs/x.txt') === 'docs' && groupOf('api/openapi.yaml') === 'shared'
+    && groupOf('docker-compose.yml') === 'shared' && groupOf('weird.cfg') === 'shared' && groupOf('frontend/src/app/api/x.ts') === null && groupOf('e2e/report/results.json') === null;
+  return { code: ok ? 0 : 1, out: '' };
+});
+test('inputs green: a README change touches only the docs gate', 0, (sb) => { const b = hashes(sb); sb.put('README.md', '# new\n'); return { code: changedGates(b, hashes(sb)) === 'docs' ? 0 : 1, out: changedGates(b, hashes(sb)) }; });
+test('inputs green: a backend change → backend gate and every E2E spec (image), not frontend', 0, (sb) => { const b = hashes(sb); sb.put('backend/src/main/java/X.java', 'class X {}'); return { code: changedGates(b, hashes(sb)) === 'backend,rooms' ? 0 : 1, out: changedGates(b, hashes(sb)) }; });
+test('inputs red: the contract or an unknown root file → every code gate', 0, (sb) => {
+  const b = hashes(sb); sb.put('weird.cfg', 'x'); const c1 = changedGates(b, hashes(sb));
+  const b2 = hashes(sb); sb.edit('api/openapi.yaml', 'listRooms', 'listAllRooms'); const c2 = changedGates(b2, hashes(sb));
+  return { code: c1 === 'backend,frontend,rooms' && c2 === 'backend,frontend,rooms' ? 0 : 1, out: `${c1} | ${c2}` };
+});
+test('inputs green: a changed spec touches only its own E2E gate', 0, (sb) => {
+  sb.put('e2e/tests/other.spec.ts', '// other'); const g0 = filesByGroup(sb.appDir); const o0 = gateHash(sb.appDir, 'e2e:other.spec.ts', g0); const b = hashes(sb);
+  sb.put('e2e/tests/other.spec.ts', '// other, changed');
+  return { code: changedGates(b, hashes(sb)) === '' && gateHash(sb.appDir, 'e2e:other.spec.ts') !== o0 ? 0 : 1, out: changedGates(b, hashes(sb)) };
+});
+test('inputs green: a spec (or test) that reads README depends on it', 0, (sb) => {
+  sb.put('e2e/tests/readme.spec.ts', "const t = readFileSync('../README.md', 'utf8');"); sb.put('README.md', 'a');
+  const r0 = gateHash(sb.appDir, 'e2e:readme.spec.ts'), b0 = gateHash(sb.appDir, 'backend');
+  sb.put('backend/src/test/java/ReadmeTest.java', 'class ReadmeTest { String f = "README.md"; }'); const b1 = gateHash(sb.appDir, 'backend');
+  sb.put('README.md', 'b');
+  return { code: gateHash(sb.appDir, 'e2e:readme.spec.ts') !== r0 && gateHash(sb.appDir, 'backend') !== b1 && b0 !== b1 ? 0 : 1, out: '' };
+});
+test('ledger green: a full verify records both layers (full) on the hashes it tested', 1, (sb) => node(sb, 'checks/verify.mjs'), (sb) => {
+  const l = JSON.parse(fs.readFileSync(LEDGER(sb), 'utf8')).gates;
+  return (l.backend?.full === true && l.backend.hash === gateHash(sb.appDir, 'backend') && !!l.frontend?.result) || JSON.stringify(l);
+});
+test('ledger red: a related verify never records a gate', 1, (sb) => { sb.state({ slice: '01_rooms', step: '04_build' }); return node(sb, 'checks/verify.mjs', ['--related']); }, (sb) => !fs.existsSync(LEDGER(sb)) || 'related run wrote the ledger');
+test('ledger green: an official E2E run records each spec it ran', 0, (sb) => { sb.put('e2e/playwright.config.ts', TEMPLATE_PW); fakePw(sb, 50, 0); return node(sb, 'bin/stack.mjs', ['e2e', '--no-up']); },
+  (sb) => { const l = JSON.parse(fs.readFileSync(LEDGER(sb), 'utf8')).gates; return (l['e2e:rooms.spec.ts']?.result === 'pass' && l['e2e:rooms.spec.ts'].hash === gateHash(sb.appDir, 'e2e:rooms.spec.ts')) || JSON.stringify(l); });
+test('gates red: nothing recorded → not all green', 1, (sb) => node(sb, 'bin/gates.mjs', ['status']), (sb, r) => /never\s+backend/.test(r.out) || r.out);
+test('gates green: every gate recorded on the current inputs → ALL GREEN', 0, (sb) => {
+  recordGatesFor(sb, ['backend', 'frontend', 'e2e:rooms.spec.ts']); return node(sb, 'bin/gates.mjs', ['status']);
+}, (sb, r) => /ALL 3 GATES GREEN/.test(r.out) || r.out);
+test('gates red: a gate green on older inputs is stale', 1, (sb) => { recordGatesFor(sb, ['backend', 'frontend', 'e2e:rooms.spec.ts']); sb.put('frontend/src/app/x.ts', 'x'); return node(sb, 'bin/gates.mjs', ['status']); },
+  (sb, r) => /stale\s+frontend .*inputs changed/.test(r.out) || r.out);
 
 // lock library (async)
 const asyncTests = [];

@@ -35,6 +35,8 @@ import { fileURLToPath } from 'node:url';
 import { context, e2eLastPath, e2eRunPath, parseArgs, readJson, run, stackHashPath, stackLockPath, tail, took, writeJson } from '../checks/lib/core.mjs';
 import { FOCUS, SCRATCH, e2eEnv, e2eFocus, failureBlock, filterArgs, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { e2eInputsHash, imageInputsHash } from '../checks/lib/hash.mjs';
+import { failedTests } from '../checks/lib/e2e.mjs';
+import { filesByGroup, gateHash, recordGates, specFiles } from '../checks/lib/inputs.mjs';
 import { acquire, alive } from '../checks/lib/lock.mjs';
 import { STACK_CONFIG, composeArgs, extraComposeFiles, loadStackConfig, projectName } from '../checks/lib/stack.mjs';
 
@@ -224,6 +226,8 @@ switch (cmd) {
     if (!args['no-up']) await up();
     const e2eDir = path.join(ctx.appDir, 'e2e');
     const tested = kind === 'official' ? e2eInputsHash(ctx.appDir) : null; // what this run tests (images are built)
+    const groups = kind === 'official' ? filesByGroup(ctx.appDir) : null;
+    const specHashes = groups ? Object.fromEntries(specFiles(groups).map((sp) => [sp, gateHash(ctx.appDir, `e2e:${sp}`, groups)])) : null;
     const tE = Date.now();
     const r = override
       ? run(override[0], override.slice(1), { cwd: e2eDir, env: { ...process.env, ...env, CI: 'true' } })
@@ -233,6 +237,16 @@ switch (cmd) {
     console.log(tail(r.out, block ? 15 : 60));
     console.log(`Playwright took ${took(Date.now() - tE)}`);
     if (tested) writeJson(e2eLastPath(appName), { hash: tested, code: r.code ? 1 : 0, at: new Date().toISOString() });
+    // Per-spec gates from the official report: a spec that ran and passed → pass on the hash it ran with.
+    if (specHashes) {
+      const rep = readJson(path.join(e2eDir, reportDir, 'results.json'));
+      const ran = new Set(), failed = new Set(failedTests(rep).map((t) => t.file));
+      const walk = (s) => { for (const sp of s.specs || []) if (sp.file) ran.add(sp.file); (s.suites || []).forEach(walk); };
+      (rep?.suites || []).forEach((s) => { if (s.file) ran.add(s.file); walk(s); });
+      const entries = {};
+      for (const sp of [...ran].filter((x) => specHashes[x])) entries[`e2e:${sp}`] = { hash: specHashes[sp], result: failed.has(sp) || r.code && !rep ? 'fail' : 'pass' };
+      if (Object.keys(entries).length) recordGates(appName, entries);
+    }
     const label = scratch ? 'SCRATCH ' : focusSlice ? 'FOCUS ' : '';
     const note = scratch ? ' (not evidence — the workflow E2E step decides)' : focusSlice ? ' (related specs only — the full E2E run is the slice gate)' : '';
     console.log(`${label}${r.code ? 'E2E FAIL' : 'E2E PASS'}${note}`);

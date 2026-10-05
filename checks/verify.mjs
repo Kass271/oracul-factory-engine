@@ -12,6 +12,7 @@ import path from 'node:path';
 import { ENGINE, STEPS, context, flakyPath, lastFailuresPath, lastRunPath, loadState, parseArgs, readJson, run, saveState, tail, took, walk, writeJson } from './lib/core.mjs';
 import { flakyCases, junitCases, junitFailures, javaTestFile, recordFlaky, vitestFailedFiles } from './lib/red.mjs';
 import { FALLOUT_MEANS, LEAK_MEANS, isolationVerdicts, layerCommand, relatedTests } from './lib/related.mjs';
+import { filesByGroup, gateHash, recordGates } from './lib/inputs.mjs';
 import { slowReport } from './lib/timing.mjs';
 
 const args = parseArgs();
@@ -71,6 +72,8 @@ function layer(name, cwd, cmd, cmdArgs) {
   if (res.code) failing.push(name);
 }
 
+// Gate ledger: what a full run tests is hashed BEFORE it runs (a change during the run makes the entry stale).
+const tested = !args.quick && !related ? (() => { const g = filesByGroup(ctx.appDir); return { backend: gateHash(ctx.appDir, 'backend', g), frontend: gateHash(ctx.appDir, 'frontend', g) }; })() : null;
 if (!args.quick) {
   for (const name of ['backend', 'frontend']) {
     if (related && !related[name].length) { console.log(`SKIP     ${name}: no related tests`); continue; }
@@ -80,6 +83,7 @@ if (!args.quick) {
     layer(name, path.join(ctx.appDir, name), p.cmd, p.args);
   }
   if (!related) writeJson(lastRunPath(ctx.app || 'fixture'), { at: new Date().toISOString(), layers });
+  if (tested && ctx.app) recordGates(ctx.app, Object.fromEntries(Object.entries(layers).map(([k, v]) => [k, { hash: tested[k], result: v.exit === 0 ? 'pass' : 'fail', full: true }])));
   const xmlDir = path.join(ctx.appDir, 'backend/build/test-results/test');
   // Failing test files of this run → the next --related run includes them.
   if (ctx.app) {
