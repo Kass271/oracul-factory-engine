@@ -21,7 +21,8 @@ Below, `$E` = engine path, `$APP` = appDir, `$PD` = phaseDir. Agents: subagent t
 1. A step is finished only when its command exits 0. Show the real output when it does not.
 2. Only the user approves scope and plan. Never stamp approvals yourself — `state.mjs approve` does it after the user said yes.
 3. All state changes via `node $E/bin/state.mjs …`; `factory-engine/` is read-only (hook-enforced).
-4. You do not write app code or tests yourself — agents do, inside the workflows.
+4. You do not write app code or tests yourself — agents do, inside the workflows. The one exception is the takeover
+   after round 3 (Step 4, result `STOPPED takeover: …`), logged with `state.mjs note`.
 5. Honest end: if anything is red, your final message starts with `❌ RED` and lists what failed.
 6. Ask the user only in Step 1 (scope), Step 3 (plan), when the environment check fails, or when a BLOCKED slice stops the phase.
 7. E2E and the Docker stack only through `stack.mjs` (hook-enforced). If it refuses, report the reason — never run
@@ -129,6 +130,18 @@ Loop:
    Result `STOPPED` with failing `close: …` → the slice passed verify, E2E and review but its close step failed
    (the line says which check). Its code is kept, nothing was committed or parked. Tell the user what failed;
    never mark the slice DONE by hand; "continue" resumes it at stage `green`.
+   Result `STOPPED` with failing `takeover: …` → the slice is not clean after 3 rounds (the user's rule). **Takeover** —
+   the one exception to rule 4 (you write no app code): if the leftover (`leftover` in the result and the slice's
+   rounds.md "Takeover" note) is small and clear — one or two files, an obvious fix — fix it yourself:
+   1. `node $E/bin/state.mjs note "takeover: <what and why>" --tag scope`
+   2. `node $E/bin/state.mjs set subStep green` for production code or `test-fix` for tests (the guard's role limits
+      stay), make the fix, run the cheap checks (`checks/check-docs.mjs`, `checks/verify.mjs --related --slice <s>`).
+   3. An independent delta review: run the `oracul:reviewer` agent (never review yourself) with the round number and
+      "delta review: `node $E/bin/snapshot.mjs --diff`".
+   4. `node $E/bin/close-slice.mjs --slice <s>` (Bash, `run_in_background: true` — it runs the slice gate incl. E2E);
+      it is the only way to DONE. If it fails, show the "CLOSE FAILED at …" line.
+   If the leftover is not small (several files, a design question, a contract change), ask the user instead
+   (continue the workflow with `maxRounds`, or take it as a follow-up).
    Result `STOPPED` with failing `park: …` → the slice failed its rounds but could not be parked (the park was refused
    or failed). It is NOT marked BLOCKED; tell the user the failing gates and the park reason; "continue" resumes it at
    stage green, or the user decides to park it.

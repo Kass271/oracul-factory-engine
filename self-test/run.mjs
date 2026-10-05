@@ -1506,7 +1506,7 @@ wf('workflow green: unlisted older tests → the analyst lists them before the t
 });
 const unmodelled = (calls) => calls.filter((c) => !c.opts.model || !c.opts.effort).map((c) => c.opts.label || '?');
 wf('models green: every agent call of a green stage with fix rounds and a failure names model + effort', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 2 }),
-  (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)), ({ result, calls }) => (result.status === 'BLOCKED' && !unmodelled(calls).length ? 0 : 1));
+  (p, o) => (/stack\.mjs" e2e-wait/.test(p) ? { exitCode: 1, output: 'E2E FAIL' } : ok0(p, o)), ({ result, calls }) => (result.status === 'STOPPED' && !unmodelled(calls).length ? 0 : 1));
 wf('models green: every agent call of a red stage with a contract sync names model + effort', 0, wfArgs({ stage: 'red' }), syncAnswer({ unlisted: true }), ({ calls }) => (!unmodelled(calls).length ? 0 : 1));
 wf('models green: triage runs on opus/high and the tester on sonnet/high, whatever the session model', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), triageSays({ code: '', tests: [{ file: 'e2e/tests/rooms.spec.ts', problem: 'x' }] }), ({ calls }) => {
   const t = calls.find((c) => /^triage/.test(c.opts.label || '')), te = calls.find((c) => /^tester: fix/.test(c.opts.label || ''));
@@ -1647,11 +1647,11 @@ wf('workflow red: a Gradle command-line error in verify → STOPPED (factory bug
 wf('workflow green: a real test failure is still triaged (not taken for a harness error)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }),
   verifyAs(() => ({ exitCode: 1, output: 'RoomsApiIT > createsRoom() FAILED\n    AssertionFailedError: Status expected:<201> but was:<501>' })), ({ calls }) => (triaged(calls) ? 0 : 1));
 const parkAnswer = (parkCode) => (p, o) => (LOOP_VERIFY.test(p) ? { exitCode: 1, output: 'RED' } : /checkout HEAD -- backend/.test(p) ? { exitCode: parkCode, output: parkCode ? 'Permission denied: git clean' : 'committed abc' } : ok0(p, o));
-wf('workflow red: the park is refused → STOPPED "park: …", the slice is not marked BLOCKED', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }), parkAnswer(1), ({ result, calls }) => {
+wf('workflow red: the park is refused → STOPPED "park: …", the slice is not marked BLOCKED', 1, wfArgs({ stage: 'green', red: { exitCode: 2, output: 'WRONG-REASON' } }), parkAnswer(1), ({ result, calls }) => {
   const parkCmd = runnerCommand(calls.find((c) => /checkout HEAD -- backend/.test(c.prompt))?.prompt || '');
   return result.status === 'STOPPED' && result.failing.some((f) => /^park: exit 1/.test(f)) && parkCmd.indexOf('BLOCKED') > parkCmd.indexOf('checkout HEAD') ? 1 : 0;
 });
-wf('workflow green: a park that runs → BLOCKED with the impact read before it', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }), parkAnswer(0), ({ result, calls }) => {
+wf('workflow green: a park that runs → BLOCKED with the impact read before it', 0, wfArgs({ stage: 'green', red: { exitCode: 2, output: 'WRONG-REASON' } }), parkAnswer(0), ({ result, calls }) => {
   const i = calls.findIndex((c) => /state\.mjs" impact 01_rooms/.test(c.prompt)), p = calls.findIndex((c) => /checkout HEAD -- backend/.test(c.prompt));
   return result.status === 'BLOCKED' && result.decision === 'CONTINUE' && i >= 0 && p > i ? 0 : 1;
 });
@@ -1685,6 +1685,13 @@ wf('G5 red: the slice gate is RED → triage and another round (targeted again)'
   let g = 0;
   return (p, o) => (/verify\.mjs" --incremental/.test(p) ? (g++ ? { exitCode: 0, output: 'GREEN' } : { exitCode: 1, output: '==== VERIFY RED: backend ====' }) : ok0(p, o));
 })(), ({ result, calls }) => (verifyKinds(calls).join(',') === 'related,gate,related,gate' && calls.some((c) => /^triage: slice gate: verify/.test(c.opts.label || '')) && result.status === 'DONE' ? 1 : 0));
+// G9: takeover after round 3 — STOPPED, code kept, never parked
+const alwaysRed = (p, o) => (/verify\.mjs" --related/.test(p) ? { exitCode: 1, output: '==== VERIFY (related tests) RED ====' } : ok0(p, o));
+wf('takeover red: not clean after 3 rounds (default) → STOPPED "takeover: …", nothing parked', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), alwaysRed, ({ result, calls }) =>
+  (result.status === 'STOPPED' && /^takeover: verify after 3 round\(s\)/.test(result.failing[0]) && result.rounds === 3 && !parked(calls) && !calls.some((c) => / r4$/.test(c.opts.label || ''))
+    && calls.some((c) => c.opts.label === 'run: note Takeover') && result.leftover?.work ? 1 : 0));
+wf('takeover green: maxRounds still overrides (1 round → takeover after 1)', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' }, maxRounds: 1 }), alwaysRed, ({ result }) => (result.status === 'STOPPED' && result.rounds === 1 ? 0 : 1));
+wf('takeover green: a clean round 2 → DONE, no takeover', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), e2eFailsFirst(), ({ result }) => (result.status === 'DONE' ? 0 : 1));
 const stopLog = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: log stop')).map((c) => runnerCommand(c.prompt));
 wf('notes green: a STOPPED by a factory command error is logged as factory-false-positive + backlog', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
   verifyAs(() => ({ exitCode: 1, output: "Problem configuring task :jacocoTestReport from command line.\n> Unknown command-line option '--tests'." })),

@@ -10,7 +10,7 @@ export const meta = {
   ],
 }
 
-// args: { engine, root, app, appDir, phase, phaseDir, slice, frs: [..], stage: 'red'|'green', agentNs?: 'oracul', maxRounds?: 5 }
+// args: { engine, root, app, appDir, phase, phaseDir, slice, frs: [..], stage: 'red'|'green', agentNs?: 'oracul', maxRounds?: 3 }
 //   stage red:   redFeedback?  — red-check output of the rejected previous attempt (skips the spec step)
 //   stage green: red: { exitCode, output } — result of `node bin/red-check.mjs --slice <s>` run by the orchestrator
 const A = args || {}
@@ -21,7 +21,7 @@ if (!['red', 'green'].includes(A.stage)) return { error: `build-slice: stage mus
 if (A.stage === 'green' && (!A.red || typeof A.red.exitCode !== 'number')) return { error: 'build-slice: stage green needs red: { exitCode, output } from red-check' }
 
 const NS = A.agentNs || 'oracul'
-const MAX = A.maxRounds || 5
+const MAX = A.maxRounds || 3 // after round 3: takeover by the orchestrator (the user's rule), never rounds 4–5
 const S = A.slice
 const FRS = (A.frs || []).join(', ')
 const node = (script, rest) => `node "${A.engine}/${script}" ${rest || ''}`.trim()
@@ -117,6 +117,7 @@ function delayTag(failing) {
   if (/stack busy|blocked by guard hook|timed out|e2e worker lost|runner returned no exit code|^park:|\bpark:/.test(f)) return 'infra'
   if (/sync: contract invalid/.test(f)) return 'agent-error'
   if (/^start:|^close:/.test(f)) return 'agent-error'
+  if (/^takeover:/.test(f)) return 'scope'
   return 'scope'
 }
 async function logStop(result) {
@@ -368,7 +369,12 @@ if (stopped) {
   await sh(node('bin/state.mjs', 'set subStep green'), 'state → green (stopped)')
   return logStop({ status: 'STOPPED', slice: S, rounds, failing: [`${stopped.gate}: ${stopped.reason}`], output: stopped.output.slice(-1500) })
 }
-if (status === 'GREEN-PENDING') status = 'BLOCKED'
+// Not clean after the last round → STOPPED for the takeover: the code is kept (never parked), the leftover is listed.
+if (status === 'GREEN-PENDING') {
+  const leftover = `${failing.join(', ') || 'unknown'} after ${rounds} round(s)`
+  await note('Takeover', `- Not clean after ${rounds} round(s): ${failing.join(', ')}.\n- Code kept, not parked. The orchestrator takes over (small targeted fix, independent delta review, bin/close-slice.mjs) or asks the user.\n- Last output:\n\n\`\`\`\n${String(feedback || '').slice(-2500)}\n\`\`\``)
+  return logStop({ status: 'STOPPED', slice: S, rounds, failing: [`takeover: ${leftover}`], output: String(feedback || '').slice(-1500), leftover: { failing, work } })
+}
 
 // ---------------------------------------------------------------- Close
 phase('Close')
