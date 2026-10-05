@@ -45,6 +45,11 @@ const ITEMS = [
     apply: () => { fs.writeFileSync(at('.dockerignore'), readText(path.join(T, 'dockerignore'))); return 'written'; },
   },
   {
+    id: 'dockerignore-md', set: 'speed', what: '.dockerignore leaves Markdown files out of the images',
+    pending: () => exists(at('.dockerignore')) && !/^\*\*\/\*\.md\s*$/m.test(readText(at('.dockerignore'))),
+    apply: () => { const t = readText(at('.dockerignore')); fs.writeFileSync(at('.dockerignore'), `${t}${t.endsWith('\n') ? '' : '\n'}**/*.md\n`); return 'appended'; },
+  },
+  {
     id: 'backend-dockerfile', set: 'speed', what: 'backend/Dockerfile with a cached Gradle layer and src/main only',
     pending: () => exists(at('backend/Dockerfile')) && readText(at('backend/Dockerfile')) !== readText(path.join(T, 'backend/Dockerfile')),
     apply: () => {

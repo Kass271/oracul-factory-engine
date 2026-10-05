@@ -15,7 +15,7 @@ import { diagnostics, summaryLine } from '../checks/lib/compile.mjs';
 import { acquire } from '../checks/lib/lock.mjs';
 import { e2eEnv, e2eFocus, failureBlock, scratchEnvProblems, scratchSupported } from '../checks/lib/e2e.mjs';
 import { slowestClasses, springContexts, summariseTimings } from '../checks/lib/timing.mjs';
-import { imageInputsHash } from '../checks/lib/hash.mjs';
+import { dockerignoreMatcher, imageInputsHash } from '../checks/lib/hash.mjs';
 import { composeArgs } from '../checks/lib/stack.mjs';
 
 const FIX = path.join(ENGINE, 'self-test', 'fixtures', 'app-green');
@@ -945,6 +945,22 @@ test('rebuild green: only tests, specs and docs changed → no rebuild', 0, (sb)
 }, (sb, r) => /images current — no rebuild/.test(r.out) || r.out);
 test('rebuild red: an unknown new file at the app root counts (fail-safe) → --build', 0, (sb) => { builtNow(sb); sb.put('nginx-extra.conf', 'x'); return upPlan(sb); },
   (sb, r) => /--build \(image inputs changed\)/.test(r.out) || r.out);
+// G2: docs never trigger a rebuild; .dockerignore decides what reaches an image (slice 03: a README line cost ~45 min)
+test('rebuild green: a README change does not change the image inputs', 0, (sb) => { builtNow(sb); sb.put('README.md', '# changed\n'); sb.put('backend/NOTES.md', 'x'); return upPlan(sb); },
+  (sb, r) => /images current — no rebuild/.test(r.out) || r.out);
+test('rebuild green: a path the app\'s .dockerignore excludes does not count', 0, (sb) => { sb.put('.dockerignore', 'notes/\n'); builtNow(sb); sb.put('notes/todo.txt', 'x'); return upPlan(sb); },
+  (sb, r) => /images current — no rebuild/.test(r.out) || r.out);
+test('rebuild red: a negated .dockerignore pattern is honoured (that file counts)', 0, (sb) => { sb.put('.dockerignore', 'config/*\n!config/keep.yml\n'); builtNow(sb); sb.put('config/keep.yml', 'x'); return upPlan(sb); },
+  (sb, r) => /--build \(image inputs changed\)/.test(r.out) || r.out);
+test('rebuild red: an unsupported .dockerignore pattern excludes nothing (fail-safe)', 0, (sb) => { sb.put('.dockerignore', 'conf[ig]/\n'); builtNow(sb); sb.put('config/x.yml', 'x'); return upPlan(sb); },
+  (sb, r) => /--build \(image inputs changed\)/.test(r.out) || r.out);
+test('dockerignore green: matcher semantics (dir, *.ext, **/x, last match wins)', 0, () => {
+  const m = dockerignoreMatcher('# c\n**/node_modules\nbuild/\n*.log\ndocs\n!docs/keep.txt\n');
+  const ok = m('frontend/node_modules/a.js') && m('build/x/y') && m('a.log') && !m('src/a.log') && m('docs/a.md') && !m('docs/keep.txt') && !m('src/main.ts');
+  return { code: ok ? 0 : 1, out: '' };
+});
+test('template green: .dockerignore leaves Markdown out of the images', 0, () => ({ code: /^\*\*\/\*\.md$/m.test(fs.readFileSync(path.join(ENGINE, 'templates/app/dockerignore'), 'utf8')) ? 0 : 1, out: '' }));
+test('migrate green: an existing .dockerignore gets **/*.md once', 0, (sb) => { sb.put('.dockerignore', 'node_modules\n'); migrate(sb, ['--speed']); migrate(sb, ['--speed']); return { code: (sb.read('.dockerignore').match(/\*\*\/\*\.md/g) || []).length === 1 ? 0 : 1, out: sb.read('.dockerignore') }; });
 test('rebuild green: --build forces a rebuild', 0, (sb) => { builtNow(sb); return node(sb, 'bin/stack.mjs', ['up', '--dry-run', '--build']); }, (sb, r) => /--build \(--build given\)/.test(r.out) || r.out);
 
 // ---------------- WP-I: stack modes the app declares (.oracul/stack.json)

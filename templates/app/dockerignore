@@ -13,3 +13,4 @@ frontend/src/**/*.spec.ts
 e2e
 docs
 .oracul
+**/*.md
