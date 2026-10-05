@@ -725,6 +725,22 @@ test('subagent-stop red: a builder leaves behaviour in the sync', 2, (sb) => {
 }, (sb, r) => /return null;/.test(r.out) || r.out);
 test('subagent-stop green: a clean sync', 0, (sb) => { syncBase(sb); addToCtrl(sb, STUB); sb.state({ step: '04_build', subStep: 'sync', slice: '01_rooms' }); return hook(sb, 'subagent-stop', { agent_type: 'oracul:backend-builder' }); });
 
+// ---------------- D2: interventions log, delay tags, factory-issue backlog
+const NOTES = (sb) => path.join(sb.stateDir, 'apps/fixture/notes.jsonl');
+const ISSUES = (sb) => path.join(sb.stateDir, 'apps/fixture/factory-issues.jsonl');
+test('notes green: a tagged note is logged with slice and subStep', 0, (sb) => { sb.state({ slice: '01_rooms', subStep: 'green' }); return node(sb, 'bin/state.mjs', ['note', 'ran the tester from the main session after a sync stop', '--tag', 'factory-false-positive']); },
+  (sb) => { const r = JSON.parse(fs.readFileSync(NOTES(sb), 'utf8').trim()); return (r.tag === 'factory-false-positive' && r.slice === '01_rooms' && r.subStep === 'green' && !fs.existsSync(ISSUES(sb))) || JSON.stringify(r); });
+test('notes red: an unknown delay class is refused', 1, (sb) => node(sb, 'bin/state.mjs', ['note', 'x', '--tag', 'bad-luck']), (sb) => !fs.existsSync(NOTES(sb)) || 'logged anyway');
+test('notes green: --issue also lands in the factory-issue backlog', 0, (sb) => node(sb, 'bin/state.mjs', ['note', 'verify --related built an invalid Gradle command', '--tag', 'factory-false-positive', '--issue']),
+  (sb) => (fs.existsSync(ISSUES(sb)) && /invalid Gradle command/.test(fs.readFileSync(ISSUES(sb), 'utf8'))) || 'no issue');
+test('notes green: a stop text with quotes, $ and backticks survives the shell', 0, (sb) => {
+  const text = 'STOPPED: "quoted" $HOME `cmd` \\ back';
+  const esc = `"${text.replace(/["\\$`]/g, '\\$&')}"`;
+  const x = spawnSync('bash', ['-c', `node "${path.join(ENGINE, 'bin/state.mjs')}" note ${esc} --tag infra`], { env: sb.env, encoding: 'utf8' });
+  const r = JSON.parse(fs.readFileSync(NOTES(sb), 'utf8').trim());
+  return { code: x.status === 0 && r.text === text ? 0 : 1, out: `${x.stderr} ${r.text}` };
+});
+
 // ---------------- hooks: guard
 const W = (file) => ({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 test('guard red: write into factory-engine', 2, (sb) => hook(sb, 'guard-edits', W(path.join(ENGINE, 'checks', 'verify.mjs'))));
@@ -1493,6 +1509,13 @@ wf('workflow green: a park that runs → BLOCKED with the impact read before it'
   const i = calls.findIndex((c) => /state\.mjs" impact 01_rooms/.test(c.prompt)), p = calls.findIndex((c) => /checkout HEAD -- backend/.test(c.prompt));
   return result.status === 'BLOCKED' && result.decision === 'CONTINUE' && i >= 0 && p > i ? 0 : 1;
 });
+const stopLog = (calls) => calls.filter((c) => c.opts.label?.startsWith('run: log stop')).map((c) => runnerCommand(c.prompt));
+wf('notes green: a STOPPED by a factory command error is logged as factory-false-positive + backlog', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }),
+  verifyAs(() => ({ exitCode: 1, output: "Problem configuring task :jacocoTestReport from command line.\n> Unknown command-line option '--tests'." })),
+  ({ result, calls }) => { const l = stopLog(calls); return result.status === 'STOPPED' && l.length === 1 && /--tag factory-false-positive --issue$/.test(l[0]) ? 0 : 1; });
+wf('notes green: an infrastructure STOPPED is tagged infra, no backlog entry', 0, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), busyThen(2),
+  ({ calls }) => { const l = stopLog(calls); return l.length === 1 && /--tag infra$/.test(l[0]) ? 0 : 1; });
+wf('notes red: a DONE slice logs no stop', 1, wfArgs({ stage: 'green', red: { exitCode: 0, output: '' } }), ok0, ({ calls }) => (stopLog(calls).length ? 0 : 1));
 for (const c of asyncCases) {
   wfStarted = true;
   let got, note = '';

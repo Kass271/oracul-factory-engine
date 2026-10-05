@@ -66,6 +66,9 @@ export const flakyPath = (app) => path.join(STATE_DIR, 'apps', app, 'flaky.json'
 export const stackHashPath = (app) => path.join(STATE_DIR, 'apps', app, 'stack-hash.json'); // inputs of the built images
 export const e2eLastPath = (app) => path.join(STATE_DIR, 'apps', app, 'e2e-last.json'); // last official full E2E run
 export const lastFailuresPath = (app) => path.join(STATE_DIR, 'apps', app, 'last-failures.json'); // failing tests of the last verify
+export const notesPath = (app) => path.join(STATE_DIR, 'apps', app, 'notes.jsonl'); // interventions + tagged stops
+export const factoryIssuesPath = (app) => path.join(STATE_DIR, 'apps', app, 'factory-issues.jsonl'); // factory backlog
+export const DELAY_TAGS = ['scope', 'app-tests', 'factory-false-positive', 'agent-error', 'infra', 'external-service'];
 export const migrationsPath = (app) => path.join(STATE_DIR, 'apps', app, 'migrations.json'); // applied / refused migrations
 // Append a timing record; a logging problem never fails the command that logs.
 export function appendTiming(app, entry) {

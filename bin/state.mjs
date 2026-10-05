@@ -16,11 +16,15 @@
 //   next-fr                                 next free FR / NFR numbers across all phases
 //   timings [--json]                        time per subStep per slice (from timings.jsonl, read-only)
 //   flaky [--json]                          tests that passed only on retry (from flaky.json, read-only)
+//   note "<why>" [--tag <delay class>] [--issue]   log an intervention or a stop (notes.jsonl); --issue also appends it
+//                                           to the factory-issue backlog (factory-issues.jsonl). Tags: scope, app-tests,
+//                                           factory-false-positive, agent-error, infra, external-service
+//   notes [--json]                          print the log
 import fs from 'node:fs';
 import path from 'node:path';
 import {
   APPS_DIR, ENGINE, ROOT, STEPS, SUBSTEPS, SLICE_STATUS, context, listPhases, loadActive, loadState,
-  parseArgs, saveState, statePath, today, writeJson, activePath, exists, readText, appendTiming, timingsPath, flakyPath, readJson,
+  parseArgs, saveState, statePath, today, writeJson, activePath, exists, readText, appendTiming, timingsPath, flakyPath, readJson, notesPath, factoryIssuesPath, DELAY_TAGS,
 } from '../checks/lib/core.mjs';
 import { formatTimings, summariseTimings } from '../checks/lib/timing.mjs';
 import { allRequirements, dependents, parsePlan } from '../checks/lib/docs.mjs';
@@ -181,6 +185,23 @@ switch (cmd) {
     const list = Object.entries(f.tests || {}).map(([test, v]) => ({ test, ...v, persistent: (v.slices || []).length >= 2 }));
     if (args.json) console.log(JSON.stringify(list));
     else console.log(list.length ? list.map((t) => `${t.persistent ? 'PERSISTENT ' : ''}FLAKY ${t.test} — seen ${t.count}× in ${(t.slices || []).join(', ') || '-'} (last ${t.lastSeen})`).join('\n') : 'no flaky tests recorded');
+    break;
+  }
+  case 'note': {
+    const ctx = need();
+    if (!a1 || !String(a1).trim()) die('note "<why>" [--tag <class>] [--issue]');
+    if (args.tag !== undefined && !DELAY_TAGS.includes(args.tag)) die(`--tag must be one of ${DELAY_TAGS.join(', ')}`);
+    const entry = { at: new Date().toISOString(), slice: ctx.state.slice, subStep: ctx.state.subStep, round: ctx.state.round, tag: args.tag || null, text: String(a1).slice(0, 2000) };
+    fs.mkdirSync(path.dirname(notesPath(ctx.app)), { recursive: true });
+    fs.appendFileSync(notesPath(ctx.app), `${JSON.stringify(entry)}\n`);
+    if (args.issue) fs.appendFileSync(factoryIssuesPath(ctx.app), `${JSON.stringify(entry)}\n`);
+    console.log(`noted${entry.tag ? ` [${entry.tag}]` : ''}${args.issue ? ' + factory issue' : ''}`);
+    break;
+  }
+  case 'notes': {
+    const ctx = need();
+    const rows = (readText(notesPath(ctx.app)) || '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    console.log(args.json ? JSON.stringify(rows) : rows.map((r) => `${r.at} ${r.slice || '-'} ${r.subStep} ${r.tag ? `[${r.tag}] ` : ''}${r.text}`).join('\n') || 'no notes');
     break;
   }
   default:

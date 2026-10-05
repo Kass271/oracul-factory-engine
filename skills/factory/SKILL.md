@@ -26,6 +26,10 @@ Below, `$E` = engine path, `$APP` = appDir, `$PD` = phaseDir. Agents: subagent t
 6. Ask the user only in Step 1 (scope), Step 3 (plan), when the environment check fails, or when a BLOCKED slice stops the phase.
 7. E2E and the Docker stack only through `stack.mjs` (hook-enforced). If it refuses, report the reason — never run
    Playwright or `docker compose` yourself.
+8. Every manual step outside a workflow (a `state.mjs set subStep …` by hand, an agent run from the main session, a
+   gate result accepted by the user) gets one line first: `node $E/bin/state.mjs note "<why>" --tag <class>`
+   (scope · app-tests · factory-false-positive · agent-error · infra · external-service; add `--issue` for a factory
+   problem — it lands in the factory-issue backlog). Workflow stops are logged automatically.
 
 ## Start / resume
 `node factory-engine/bin/state.mjs show --json`

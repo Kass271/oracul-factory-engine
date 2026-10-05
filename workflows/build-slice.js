@@ -107,6 +107,21 @@ function infraReason(r) {
 }
 // The command is fenced with more backticks than any run inside it: note() bodies contain ``` blocks, and a plain
 // ``` fence ended the command early for the runner model.
+// Every STOPPED is logged with a delay class (state.mjs note --tag); factory causes also go to the factory-issue backlog.
+const shArg = (t) => `"${String(t).replace(/["\\$`]/g, '\\$&').replace(/\s+/g, ' ').slice(0, 400)}"`
+function delayTag(failing) {
+  const f = failing.join(' ')
+  if (/factory command error/.test(f)) return 'factory-false-positive'
+  if (/stack busy|blocked by guard hook|timed out|e2e worker lost|runner returned no exit code|^park:|\bpark:/.test(f)) return 'infra'
+  if (/sync: contract invalid/.test(f)) return 'agent-error'
+  if (/^start:|^close:/.test(f)) return 'agent-error'
+  return 'scope'
+}
+async function logStop(result) {
+  const tag = delayTag(result.failing || [])
+  await sh(node('bin/state.mjs', `note ${shArg(`STOPPED ${S}: ${(result.failing || []).join('; ')} — ${String(result.output || '').split('\n').filter(Boolean).slice(-2).join(' / ')}`)} --tag ${tag}${tag === 'factory-false-positive' ? ' --issue' : ''}`), `log stop ${S}`)
+  return result
+}
 const fenceFor = (cmd) => '`'.repeat(Math.max(3, ...[...String(cmd).matchAll(/`+/g)].map((m) => m[0].length + 1)))
 async function runOnce(cmd, label) {
   const f = fenceFor(cmd)
@@ -187,7 +202,7 @@ const countOf = (re, out) => { const m = String(out || '').match(re); return m ?
 // → null when production code compiles (or the contract did not change), else the STOPPED result of stage red.
 async function contractSync() {
   const stop = (why, output) => note('Contract sync stopped', `- ${why}\n- No tester ran; nothing parked. The user decides (a large or undeclared contract break).\n- Output:\n\n\`\`\`\n${String(output).slice(-2500)}\n\`\`\``)
-    .then(() => ({ stage: 'red', status: 'STOPPED', slice: S, failing: [`sync: ${why}`], output: String(output).slice(-1500) }))
+    .then(() => logStop({ stage: 'red', status: 'STOPPED', slice: S, failing: [`sync: ${why}`], output: String(output).slice(-1500) }))
   // An invalid contract is the analyst's, not the builders': one repair, then STOPPED (slice 03: unquoted YAML).
   let valid = await sh(node('checks/check-contract.mjs', '--validate'), `validate contract ${S}`, { gate: true })
   if (infraReason(valid)) return stop(infraReason(valid), valid.output)
@@ -271,7 +286,7 @@ if (status === 'GREEN-PENDING') {
   if (start.exitCode !== 0) {
     const why = infraReason(start) || (start.output.split('\n').map((l) => l.trim()).find((l) => /^(INVALID|MISSING)\b/.test(l)) || `exit ${start.exitCode}`)
     await note('Start check failed', `- ${why}\n- No builder ran; nothing to park. Fix the named doc (02_specs → analyst Step 4a; red-evidence → red-check), then resume stage green.\n- Output:\n\n\`\`\`\n${start.output.slice(-1500)}\n\`\`\``)
-    return { status: 'STOPPED', slice: S, rounds: 0, failing: [`start: ${why}`], output: start.output.slice(-1500) }
+    return logStop({ status: 'STOPPED', slice: S, rounds: 0, failing: [`start: ${why}`], output: start.output.slice(-1500) })
   }
 }
 while (status === 'GREEN-PENDING' && rounds < MAX) {
@@ -371,7 +386,7 @@ while (status === 'GREEN-PENDING' && rounds < MAX) {
 if (stopped) {
   await note(`Round ${rounds}`, `- Trigger: ${stopped.gate} could not run — ${stopped.reason} (infrastructure, not a code failure). Not triaged, slice STOPPED, code kept in the working tree; "continue" resumes at stage green.\n- Output:\n\n\`\`\`\n${stopped.output.slice(-1500)}\n\`\`\``)
   await sh(node('bin/state.mjs', 'set subStep green'), 'state → green (stopped)')
-  return { status: 'STOPPED', slice: S, rounds, failing: [`${stopped.gate}: ${stopped.reason}`], output: stopped.output.slice(-1500) }
+  return logStop({ status: 'STOPPED', slice: S, rounds, failing: [`${stopped.gate}: ${stopped.reason}`], output: stopped.output.slice(-1500) })
 }
 if (status === 'GREEN-PENDING') status = 'BLOCKED'
 
@@ -394,7 +409,7 @@ if (status === 'DONE') {
   const why = infraReason(close) || (close.output.split('\n').map((l) => l.trim()).find((l) => /^(INVALID|MISSING)\b|^==== VERIFY RED/.test(l)) || `exit ${close.exitCode}`)
   await note('Close failed', `- ${why}\n- Not parked: verify, E2E and review had passed. The slice stays IN_PROGRESS with its code; "continue" resumes it at stage green.\n- Output:\n\n\`\`\`\n${close.output.slice(-1500)}\n\`\`\``)
   await sh(node('bin/state.mjs', 'set subStep green'), 'state → green (close failed)')
-  return { status: 'STOPPED', slice: S, rounds, failing: [`close: ${why}`], output: close.output.slice(-1500) }
+  return logStop({ status: 'STOPPED', slice: S, rounds, failing: [`close: ${why}`], output: close.output.slice(-1500) })
 }
 
 // BLOCKED: write the failure note, park the code, keep the docs, decide CONTINUE/STOP.
@@ -415,6 +430,6 @@ const park = await sh([
 if (park.exitCode !== 0) {
   const why = infraReason(park) || `exit ${park.exitCode}`
   await note('Park failed', `- The slice failed after ${rounds} round(s) (${failing.join(', ')}), but parking it failed: ${why}.\n- Not marked BLOCKED; the code is in the working tree as far as the park got. The user decides (continue the slice, or park it).\n- Output:\n\n\`\`\`\n${park.output.slice(-1500)}\n\`\`\``)
-  return { status: 'STOPPED', slice: S, rounds, failing: [...failing, `park: ${why}`], output: park.output.slice(-1500) }
+  return logStop({ status: 'STOPPED', slice: S, rounds, failing: [...failing, `park: ${why}`], output: park.output.slice(-1500) })
 }
 return { status: 'BLOCKED', slice: S, rounds, failing, decision: impact.decision, dependents: impact.dependents }
