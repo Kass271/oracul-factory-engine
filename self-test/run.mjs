@@ -693,6 +693,30 @@ test('artifacts red: release with a sync marker left', 1, (sb) => {
   node(sb, 'checks/gen-traceability.mjs'); sb.put(CTRL, CTRL_V1.replace(/}\n$/, STUB));
   return node(sb, 'checks/check-artifacts.mjs', ['--step', '05_release']);
 }, (sb, r) => /noSyncMarkers/.test(r.out) || r.out);
+// F4: a field that lost `required` moves from the generated constructor to its fluent setter (slice 03, FR-45)
+const SUMMARY = (req) => `components:\n  schemas:\n    RecentRunSummary:\n      type: object\n      required: [${req}]\n      properties:\n        id:\n          type: string\n        headline:\n          type: string\n`;
+const MAPPER = 'backend/src/main/java/com/oracul/app/runs/RunMapper.java';
+const mapperWith = (body) => `package com.oracul.app.runs;\n\nclass RunMapper {\n    RecentRunSummary toSummary(Run run) {\n${body}\n    }\n}\n`;
+const moveBase = (sb) => { sb.put('api/openapi.yaml', sb.read('api/openapi.yaml') + SUMMARY('id, headline')); sb.put(MAPPER, mapperWith('        return new RecentRunSummary(run.id(), run.headline());')); gitApp(sb); };
+test('sync green: required → optional — constructor argument moved to the setter', 0, (sb) => {
+  moveBase(sb); sb.edit('api/openapi.yaml', 'required: [id, headline]', 'required: [id]');
+  sb.put(MAPPER, mapperWith('        return new RecentRunSummary(run.id()).headline(run.headline());'));
+  return node(sb, 'checks/check-sync.mjs');
+});
+test('sync green: …also when the setter is on the next line', 0, (sb) => {
+  moveBase(sb); sb.edit('api/openapi.yaml', 'required: [id, headline]', 'required: [id]');
+  sb.put(MAPPER, mapperWith('        return new RecentRunSummary(run.id())\n            .headline(run.headline());'));
+  return node(sb, 'checks/check-sync.mjs');
+});
+test('sync red: the same move without a contract change', 1, (sb) => { moveBase(sb); sb.put(MAPPER, mapperWith('        return new RecentRunSummary(run.id()).headline(run.headline());')); return node(sb, 'checks/check-sync.mjs'); });
+test('sync red: the setter gets a different value than the removed argument', 1, (sb) => {
+  moveBase(sb); sb.edit('api/openapi.yaml', 'required: [id, headline]', 'required: [id]');
+  sb.put(MAPPER, mapperWith('        return new RecentRunSummary(run.id()).headline("n/a");')); return node(sb, 'checks/check-sync.mjs');
+});
+test('sync red: a setter for a field that is still required', 1, (sb) => {
+  moveBase(sb); sb.edit('api/openapi.yaml', 'required: [id, headline]', 'required: [headline]');
+  sb.put(MAPPER, mapperWith('        return new RecentRunSummary(run.id()).headline(run.headline());')); return node(sb, 'checks/check-sync.mjs');
+});
 test('state green: set subStep sync', 0, (sb) => node(sb, 'bin/state.mjs', ['set', 'subStep', 'sync']));
 test('subagent-stop red: a builder leaves behaviour in the sync', 2, (sb) => {
   syncBase(sb); addToCtrl(sb, STUB.replace('throw new NotImplementedException();', 'return null;'));

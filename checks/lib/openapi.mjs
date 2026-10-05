@@ -36,3 +36,38 @@ export function requiredNullable(text) {
   flush();
   return out;
 }
+
+// Required properties per schema: Map "Schema" → Set(prop). Same subset as requiredNullable.
+export function requiredBySchema(text) {
+  const out = new Map();
+  let inComponents = false, inSchemas = false, schema = null, mode = null;
+  for (const raw of String(text || '').split('\n')) {
+    if (!raw.trim() || /^\s*#/.test(raw)) continue;
+    const indent = raw.match(/^ */)[0].length;
+    const line = raw.trim();
+    if (indent === 0) { inComponents = line === 'components:'; inSchemas = false; schema = null; continue; }
+    if (!inComponents) continue;
+    if (indent === 2) { inSchemas = line === 'schemas:'; schema = null; continue; }
+    if (!inSchemas) continue;
+    if (indent === 4 && /^[\w.-]+:\s*$/.test(line)) { schema = line.slice(0, -1); out.set(schema, new Set()); mode = null; continue; }
+    if (!schema) continue;
+    if (indent === 6) {
+      const req = line.match(/^required:\s*(\[.*\])?\s*$/);
+      mode = req ? 'required' : null;
+      if (req?.[1]) req[1].slice(1, -1).split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter(Boolean).forEach((x) => out.get(schema).add(x));
+      continue;
+    }
+    if (mode === 'required' && /^-\s*/.test(line)) out.get(schema).add(line.replace(/^-\s*/, '').replace(/^["']|["']$/g, ''));
+  }
+  return out;
+}
+// Properties that were required in `before` and are not in `after`: Map "Schema" → Set(prop).
+export function lostRequired(before, after) {
+  const a = requiredBySchema(before), b = requiredBySchema(after);
+  const out = new Map();
+  for (const [schema, props] of a) {
+    const lost = [...props].filter((p) => b.has(schema) && !b.get(schema).has(p));
+    if (lost.length) out.set(schema, new Set(lost));
+  }
+  return out;
+}

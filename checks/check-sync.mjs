@@ -4,12 +4,17 @@
 //   blank / comment · import / package · annotation · braces and punctuation only · a declaration line (class, enum
 //   constant, method signature without "=" or "return") · a line with the sync marker (NotImplementedException /
 //   notImplemented()) · a removed line with a rename declared in 02_specs/contract-notes.md ("Renamed: Old → New").
-// A removed line needs such a renamed counterpart (sync never deletes code). The marker files themselves are allowed
+// A removed line needs such a renamed counterpart (sync never deletes code).
+// A field that lost `required` in the contract (since the last finished slice) changes the generated constructor; moving
+// its argument to the fluent setter — `new X(a, b, c)` → `new X(a, c).b(b)` — is accepted when X lost that field's
+// `required`, every setter is such a field, and the moved values are exactly the removed constructor arguments. The marker files themselves are allowed
 // when they equal the engine templates.
 //   --release   no sync marker may be left in production code (every contract operation is implemented)
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE, Report, context, parseArgs, readText, run, walk } from './lib/core.mjs';
+import { greenBase } from './lib/compile.mjs';
+import { lostRequired } from './lib/openapi.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -58,6 +63,46 @@ for (const rel of untracked.out.split('\n').filter(Boolean)) {
   for (const line of (readText(path.join(ctx.appDir, rel)) || '').split('\n')) added.push({ rel, line });
 }
 
+// ---- required → optional moves
+const base = greenBase(ctx.appDir);
+const lost = base ? lostRequired(run('git', ['-C', ctx.appDir, 'show', `${base}:api/openapi.yaml`]).out, readText(path.join(ctx.appDir, 'api/openapi.yaml')) || '') : new Map();
+const camel = (p) => p.replace(/[-_](\w)/g, (_, c) => c.toUpperCase());
+function splitArgs(s) { const out = []; let depth = 0, cur = ''; for (const ch of s) { if ('([{'.includes(ch)) depth++; if (')]}'.includes(ch)) depth--; if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; } else cur += ch; } if (cur.trim()) out.push(cur.trim()); return out; }
+// `new X(args)` with balanced parentheses → { type, args, start, end }
+function ctorCall(line) {
+  const m = line.match(/new\s+(\w+)\s*\(/);
+  if (!m) return null;
+  let i = m.index + m[0].length, depth = 1;
+  for (; i < line.length && depth; i++) { if (line[i] === '(') depth++; else if (line[i] === ')') depth--; }
+  return depth ? null : { type: m[1], args: splitArgs(line.slice(m.index + m[0].length, i - 1)), start: m.index, end: i };
+}
+const movedOk = new Set(); // "rel\u0000line" of accepted added/removed lines
+if (lost.size) {
+  for (const r of removed) {
+    const rc = ctorCall(r.line);
+    if (!rc || !lost.has(rc.type)) continue;
+    const fields = new Set([...lost.get(rc.type)].map(camel));
+    for (const a of added.filter((x) => x.rel === r.rel)) {
+      const ac = ctorCall(a.line);
+      if (!ac || ac.type !== rc.type) continue;
+      const rest = [...rc.args];
+      if (!ac.args.every((x) => { const k = rest.indexOf(x); if (k < 0) return false; rest.splice(k, 1); return true; })) continue;
+      // the moved values must be set via setters of fields that lost `required` — on this line or following added lines
+      const setters = [];
+      const chain = a.line.slice(ac.end);
+      for (const m of chain.matchAll(/\.(\w+)\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)) setters.push({ f: m[1], v: m[2].trim() });
+      const follow = added.filter((x) => x.rel === r.rel && /^\s*\.\w+\(.*\)\s*[;,)]?\s*$/.test(x.line) && added.indexOf(x) > added.indexOf(a)).slice(0, rest.length);
+      for (const x of follow) { const m = x.line.trim().match(/^\.(\w+)\((.*)\)\s*[;,)]?$/); if (m) setters.push({ f: m[1], v: m[2].trim(), line: x }); }
+      const used = setters.filter((st) => fields.has(st.f) && rest.includes(st.v));
+      const prefixOk = a.line.slice(0, ac.start).trim() === r.line.slice(0, rc.start).trim();
+      if (!prefixOk || used.length !== rest.length || setters.some((st) => !st.line && !(fields.has(st.f) && rest.includes(st.v)))) continue;
+      movedOk.add(`${r.rel}\u0000${r.line}`); movedOk.add(`${a.rel}\u0000${a.line}`);
+      for (const st of used) if (st.line) movedOk.add(`${st.line.rel}\u0000${st.line.line}`);
+      break;
+    }
+  }
+}
+
 const trivial = (t) => t === '' || /^(\/\/|\/\*|\*|\*\/)/.test(t) || /^(import|package)\b/.test(t) || /^export\s+(\*|\{[^}]*\})\s+from\b/.test(t)
   || /^@[\w.]+(\(.*\))?$/.test(t) || /^[{}()[\];,]*$/.test(t);
 const declaration = (t) => !/[=]|\breturn\b|\bnew\b/.test(t) && (
@@ -69,7 +114,7 @@ const renamedTo = new Set(removed.map((x) => applyRenames(x.line.trim())).filter
 const violations = [];
 for (const a of added) {
   const t = a.line.trim();
-  if (trivial(t) || declaration(t) || MARKER.test(t) || renamedTo.has(t)) continue;
+  if (trivial(t) || declaration(t) || MARKER.test(t) || renamedTo.has(t) || movedOk.has(`${a.rel}\u0000${a.line}`)) continue;
   violations.push(`${a.rel}: + ${t.slice(0, 120)}`);
 }
 const addedSet = new Set(added.map((x) => x.line.trim()));
@@ -80,6 +125,7 @@ for (const d of removed) {
   const t = d.line.trim();
   if (trivial(t)) continue;
   if (declName(t) && addedDecls.has(declName(t))) continue;
+  if (movedOk.has(`${d.rel}\u0000${d.line}`)) continue;
   if (!addedSet.has(applyRenames(t)) || applyRenames(t) === t) violations.push(`${d.rel}: - ${t.slice(0, 120)} (removed without a declared rename)`);
 }
 console.log(`SYNC VIOLATIONS: ${violations.length}`);
