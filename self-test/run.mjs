@@ -134,6 +134,19 @@ test('template green: template code builds generated models fluently (no require
 test('template red: the old generator options are reported', 1, () => ({ code: genDefaults(TPL_GRADLE.replace('"skipDefaultInterface" to "false"', '"skipDefaultInterface" to "true"')) ? 0 : 1, out: '' }));
 test('template green: null optional fields are left out of the JSON', 0, () => ({ code: /^spring\.jackson\.default-property-inclusion=non_null$/m.test(fs.readFileSync(path.join(ENGINE, 'templates/app/backend/src/main/resources/application.properties'), 'utf8')) ? 0 : 1, out: '' }));
 
+// F2: the real generators must accept the contract (an unquoted ": " passed every text check in slice 03)
+const genFake = (sb, map) => { sb.env.ORACUL_GENERATE_FAKE = JSON.stringify(map); };
+test('contract red: --validate — the generator rejects the YAML', 1, (sb) => { genFake(sb, { backend: { code: 1, out: 'Exception: mapping values are not allowed here\n at line 1088' } }); return node(sb, 'checks/check-contract.mjs', ['--validate']); },
+  (sb, r) => /backend generator rejects api\/openapi\.yaml — Exception: mapping values are not allowed here/.test(r.out) || r.out);
+test('contract green: --validate — both generators accept it', 0, (sb) => { genFake(sb, {}); return node(sb, 'checks/check-contract.mjs', ['--validate']); },
+  (sb, r) => (/backend generator accepts/.test(r.out) && /frontend generator accepts/.test(r.out)) || r.out);
+test('contract green: --validate skips an unchanged contract (no generator call)', 0, (sb) => { gitApp(sb); genFake(sb, { backend: { code: 1, out: 'boom' } }); return node(sb, 'checks/check-contract.mjs', ['--validate']); },
+  (sb, r) => /validate: api\/openapi\.yaml unchanged/.test(r.out) || r.out);
+test('contract green: --validate without the generator tools → WARN, not INVALID', 0, (sb) => node(sb, 'checks/check-contract.mjs', ['--validate']),
+  (sb, r) => /WARN\s+validate: backend\/gradlew not found/.test(r.out) || r.out);
+test('artifacts red: the slice spec gate fails when the generator rejects the contract', 1, (sb) => { genFake(sb, { frontend: { code: 1, out: 'Error: could not parse' } }); return node(sb, 'checks/check-artifacts.mjs', ['--step', '04_build', '--slice', '01_rooms', '--stage', 'spec']); },
+  (sb, r) => /contractParses\] — validate: the frontend generator rejects/.test(r.out) || r.out);
+
 // ---------------- review
 test('review green: slices + release', 0, (sb) => {
   const a = node(sb, 'checks/check-review.mjs');
@@ -425,9 +438,9 @@ test('compile-check green: the same older test listed under "Changes earlier beh
   sb.edit(SPEC, '- Changes earlier behaviour: none', `- Changes earlier behaviour: field renamed (tests: ${OLD})`);
   return node(sb, 'bin/compile-check.mjs', ['--layer', 'backend', '--stage', 'tests', '--slice', '01_rooms', '--require-listed']);
 }, (sb, r) => !/UNLISTED/.test(r.out) || r.out);
-const gitApp = (sb, msg = 'phase-01_mvp 00_setup: skeleton') => {
+function gitApp(sb, msg = 'phase-01_mvp 00_setup: skeleton') { // hoisted: used by earlier sections too
   for (const a of [['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', msg]]) spawnSync('git', a, { cwd: sb.appDir });
-};
+}
 test('compile-check green: contract unchanged since the last finished slice → nothing to check', 0, (sb) => { gitApp(sb); fakeCompile(sb, { 'backend:main': { code: 1, out: 'x' } }); return node(sb, 'bin/compile-check.mjs', ['--if-contract-changed']); },
   (sb, r) => /unchanged since the last finished slice/.test(r.out) || r.out);
 test('compile-check red: contract changed since the last finished slice → it compiles (and fails here)', 1, (sb) => {

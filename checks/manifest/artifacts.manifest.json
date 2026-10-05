@@ -27,6 +27,7 @@
   ],
   "04_build": [
     { "path": "docs/{phase}/02_specs", "rule": "sliceSpec", "stage": "spec" },
+    { "path": "api/openapi.yaml", "rule": "contractParses", "stage": "spec" },
     { "path": "docs/{phase}/04_build/{slice}/red-evidence.md", "rule": "contains:RESULT: RED", "stage": "red" },
     { "path": "docs/{phase}/04_build/{slice}/review-findings.json", "rule": "reviewFile", "stage": "review" },
     { "path": "docs/{phase}/04_build/{slice}/review-findings.json", "rule": "reviewClean", "stage": "done" },

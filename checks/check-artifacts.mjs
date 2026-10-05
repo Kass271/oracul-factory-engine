@@ -119,6 +119,12 @@ const RULES = {
     const bad = (readText(p) || '').split('\n').filter((l) => l.includes('✔') && !/\]\([^)]+\)/.test(l) && /FR-\d+/.test(l));
     return !bad.length || `${bad.length} ✔ line(s) without an evidence link`;
   },
+  // The real generators accept the contract (check-contract --validate; skipped when the contract is unchanged).
+  contractParses: () => {
+    const res = run('node', [path.join(ENGINE, 'checks', 'check-contract.mjs'), '--validate', '--app-dir', ctx.appDir, ...(ctx.app ? ['--app', ctx.app] : [])]);
+    const bad = res.out.split('\n').filter((l) => /^INVALID\s+validate:/.test(l)).map((l) => l.replace(/^INVALID\s+/, ''));
+    return !bad.length || bad.join('; ');
+  },
   // Every contract operation implemented: no contract sync marker left (bin/../checks/check-sync.mjs --release).
   noSyncMarkers: () => {
     const res = run('node', [path.join(ENGINE, 'checks', 'check-sync.mjs'), '--release', '--app-dir', ctx.appDir, ...(ctx.app ? ['--app', ctx.app] : [])]);

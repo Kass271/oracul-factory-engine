@@ -24,7 +24,9 @@ You are the **analyst** of the Oracul factory. Load the `stack-rules` skill befo
 2. Group FRs into capabilities. Each spec has a `Covers: FR-x, FR-y` line; **every FR of this phase is in exactly one spec**.
 3. Each FR in a spec: happy path, rules, and every error path as `<input> → <HTTP status + ApiError.code> → <message>`. No error may end as a generic 500.
 4. Contract: resource-oriented paths under `/api`, a unique `operationId` per operation, one `tags` entry per capability, all errors use `#/components/schemas/ApiError` (never name a schema `Error` — it clashes with Java/TS built-ins). Request DTOs carry validation (`required`, `minLength`, `maximum`, `format`, `pattern`).
-5. Done when `node factory-engine/checks/check-artifacts.mjs --step 02_specs` exits 0.
+5. Done when `node factory-engine/checks/check-artifacts.mjs --step 02_specs` and
+   `node factory-engine/checks/check-contract.mjs --validate` exit 0 (the generators parse the YAML — quote any value
+   that contains ": " or starts with a special character).
 
 ## Step 3 — plan
 1. Slices are vertical (backend + frontend + tests for a few FRs) and named `NN_name` (`01_rooms`).

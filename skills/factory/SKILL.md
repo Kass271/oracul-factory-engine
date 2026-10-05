@@ -65,7 +65,8 @@ Then `node $E/bin/state.mjs set step 02_specs`.
 ## Step 2 — specs + contract
 Agent `oracul:analyst`: "Step 2 for `$APP`, phase docs `$PD`: write the capability specs, contract-notes and extend
 api/openapi.yaml for all FRs in `$PD/01_scope/requirements.md`."
-Exit: `check-artifacts --step 02_specs` = 0 and `check-contract` = 0 (rerun the analyst with the output if not, max 3 times),
+Exit: `check-artifacts --step 02_specs` = 0 and `check-contract --validate` = 0 (the real generators must accept the
+contract; rerun the analyst with the output if not, max 3 times),
 then commit `"<phase> 02_specs: specs + contract"` and `set step 03_plan`.
 
 ## Step 3 — plan

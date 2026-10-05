@@ -4,12 +4,17 @@
 //   2. backend generates Spring interfaces from it before compiling
 //   3. frontend generates the Angular client from it before build/test
 //   4. --require-generated: generated code exists and is newer than openapi.yaml (verify passes this after building)
+//   6. --validate: the real generators accept api/openapi.yaml (backend openApiGenerate, frontend generate:api) —
+//      only when the contract changed since the last finished slice. A YAML value with an unquoted ": " passed every
+//      text check and broke both generators later (slice 03). Seam: ORACUL_GENERATE_FAKE='{"backend":{"code":1,"out":"…"}}'
 //   5. no property is both required and nullable when the app leaves null fields out of the JSON
 //      (spring.jackson.default-property-inclusion=non_null) — it would vanish from responses. Other apps: WARN only.
 import fs from 'node:fs';
 import path from 'node:path';
 import { Report, context, parseArgs, readJson, readText } from './lib/core.mjs';
 import { requiredNullable } from './lib/openapi.mjs';
+import { contractChanged } from './lib/compile.mjs';
+import { run } from './lib/core.mjs';
 
 const args = parseArgs();
 const ctx = context(args);
@@ -40,6 +45,22 @@ if (spec !== null) {
   if (!both.length) r.pass('no property is both required and nullable');
   else if (nonNull) r.invalid(`required + nullable: ${both.join(', ')} — with NON_NULL a null value disappears from the JSON; make it optional (absent = null) or non-null`);
   else r.warn(`required + nullable: ${both.join(', ')} (allowed here: this app writes null fields)`);
+}
+
+if (args.validate && spec !== null) {
+  if (!contractChanged(ctx.appDir)) r.skip('validate: api/openapi.yaml unchanged since the last finished slice');
+  else {
+    const fake = process.env.ORACUL_GENERATE_FAKE ? JSON.parse(process.env.ORACUL_GENERATE_FAKE) : null;
+    // [layer, cmd, args, the tool that must exist for the generator to run at all]
+    const gens = [['backend', './gradlew', ['-q', 'openApiGenerate', '--console=plain'], 'backend/gradlew'], ['frontend', 'npm', ['run', 'generate:api', '--silent'], 'frontend/node_modules/.bin/ng-openapi-gen']];
+    for (const [layer, cmd, a, tool] of gens) {
+      if (!fake && !fs.existsSync(at(tool))) { r.warn(`validate: ${tool} not found — the ${layer} generator cannot run here (not a contract problem)`); continue; }
+      const res = fake ? (fake[layer] || { code: 0, out: '' }) : run(cmd, a, { cwd: at(layer), env: { ...process.env, CI: 'true' } });
+      if (res.code === 0) { r.pass(`validate: the ${layer} generator accepts api/openapi.yaml`); continue; }
+      const lines = String(res.out || '').split('\n').map((l) => l.trim()).filter((l) => /error|exception|invalid|unexpected|mapping values|could not|failed/i.test(l) && !/^at /.test(l)).slice(0, 6);
+      r.invalid(`validate: the ${layer} generator rejects api/openapi.yaml — ${lines.join(' | ') || `exit ${res.code}`}`);
+    }
+  }
 }
 
 const gradle = readText(at('backend/build.gradle.kts'));
